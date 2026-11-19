@@ -505,6 +505,12 @@ All in `dashboard/src/`. Split `App.jsx` into components as it grows.
   instruction plus a few presets like climb, descend, heading). The form is
   disabled with a reason when the aircraft is not in your sector, is
   `TRANSFERRING`, or is `SUSPECT`.
+  **As built (Nov 19):** the form floats in a popover next to the clicked
+  aircraft and follows it; it flips to the left (or upwards) near the edges
+  and closes on ×, Esc, or a click elsewhere. The side panel keeps one
+  "selected" line. Clicks select the nearest aircraft within 18 screen
+  pixels, and above 40 aircraft only the hovered, selected, `SUSPECT` and
+  `TRANSFERRING` ones are labelled ("all labels" turns every label back on).
 - **Pending and recent clearances** list with status (pending, committed with
   log index, expired, rejected).
 - **Cluster table**: a Ready column per cluster and the buffer size.
