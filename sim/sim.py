@@ -11,11 +11,11 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from gateway_client import GatewayClient
 from recording import record_frame, replay_frames
 
 SIZE = 200.0  # Airspace width and height in nautical miles
 
-GATEWAY = os.environ.get("GATEWAY", "http://gateway:8080")
 AIRCRAFT = int(os.environ.get("AIRCRAFT", "100"))
 TICK = float(os.environ.get("TICK", "1.0"))
 SEED = os.environ.get("SEED")
@@ -144,16 +144,13 @@ def step(ac, dt):
     ac["y"] = (ac["y"] + nm * math.cos(rad)) % SIZE
 
 
+gateway = GatewayClient("simulator")
+
+
 def send(fleet):
     # The gateway only gets what the aircraft claims, not where it transmits from.
     claims = [{k: v for k, v in ac.items() if k != "emitter"} for ac in fleet]
-    body = json.dumps(claims).encode()
-    req = urllib.request.Request(
-        GATEWAY + "/api/positions",
-        data=body,
-        headers={"Content-Type": "application/json"},
-    )
-    urllib.request.urlopen(req, timeout=2).read()
+    gateway.positions(claims)
 
 
 _pool = ThreadPoolExecutor(max_workers=max(1, 2 * len(RECEIVERS)))
@@ -212,7 +209,7 @@ def run_live():
         fleet = make_fleet(rng)
 
     ghosts = sum(1 for ac in fleet if "emitter" in ac)
-    print(f"simulating {len(fleet)} aircraft ({ghosts} spoofed), tick {TICK}s -> {GATEWAY}", flush=True)
+    print(f"simulating {len(fleet)} aircraft ({ghosts} spoofed), tick {TICK}s -> {gateway.describe()}", flush=True)
     if RECEIVERS:
         print(f"broadcasting to receivers: {', '.join(RECEIVERS)}", flush=True)
 

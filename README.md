@@ -128,19 +128,67 @@ Crashes one Maekawa voter and the registry leader halfway, prints messages per
 entry and blocking for both, and saves JSON to `results/`. See
 [docs/how-it-works.md](docs/how-it-works.md) for what the numbers mean.
 
+## gRPC
+
+Every internal link uses gRPC (`proto/atc.proto`, port 9090): the gateway
+calls each Raft node (service `Node`), and the simulator and ground receivers
+report to the gateway (service `Gateway`). The radar still uses HTTP and the
+WebSocket, since browsers cannot speak plain gRPC. The original HTTP/JSON
+endpoints still exist, so the transport can be switched for comparison:
+
+```bash
+docker compose up --build                            # TRANSPORT=grpc (default)
+TRANSPORT=http MTLS=off docker compose up --build    # original HTTP/JSON
+```
+
+## Mutual TLS
+
+Every gRPC link uses mutual TLS. `docker compose up` first runs a one-shot
+`certs` service (`scripts/gen-certs.sh`) that makes a dev CA and one
+certificate per service in `./certs` (git-ignored; delete it for a new CA).
+Each server checks the caller's certificate and then who it is: only the
+gateway may write to a node, only the simulator may report positions, and a
+receiver may only report under its own name. The HTTP write endpoints are
+closed while mTLS is on.
+
+```bash
+docker compose run --rm intruder           # rogue container: 4 attempts to write to the registry, all refused
+MTLS=off docker compose up -d              # before: no mTLS
+MTLS=off docker compose run --rm intruder  # the same attempts succeed
+TRANSPORT=http MTLS=off docker compose up  # original HTTP/JSON everywhere (comparison only)
+```
+
+### Regenerating the gRPC code
+
+The generated code is committed (Go in `internal/atcpb/`, Python in
+`sim/atc_pb2*.py`), so the Docker builds need no `protoc`. After changing
+`proto/atc.proto`:
+
+```bash
+go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
+go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
+protoc -I proto --go_out=. --go_opt=module=atc \
+  --go-grpc_out=. --go-grpc_opt=module=atc proto/atc.proto
+pip install grpcio-tools==1.85.3
+python -m grpc_tools.protoc -I proto --python_out=sim --grpc_python_out=sim proto/atc.proto
+```
+
 ## Layout
 
 ```
-cmd/node/          Raft replica (hashicorp/raft + raft-boltdb), HTTP: /status /state /apply /metrics
+cmd/node/          Raft replica (hashicorp/raft + raft-boltdb), HTTP: /status /state /apply /metrics, gRPC: service Node
 cmd/gateway/       gateway: leader tracking, position multicast, handoff coordinator, WebSocket feed
 cmd/maekawa/       Maekawa baseline (grid voting sets, INQUIRE/FAILED/YIELD)
+cmd/intruder/      mTLS demo: a rogue container trying to write to the registry
 internal/fsm/      replicated state machine: ownership states + key/value
+internal/mtls/     mutual TLS setup and per-RPC authorization by certificate name
+internal/atcpb/    generated gRPC code (from proto/atc.proto)
 docs/              how-it-works.md: every file, the course mapping, the comparison
-proto/atc.proto    DRAFT gRPC contract (not compiled yet)
+proto/atc.proto    gRPC contract; generated Go code in internal/atcpb/
 sim/               sim.py (live / record / replay, spoof mode), receiver.py (ground station)
 dashboard/         React + Vite radar
 deploy/            go.Dockerfile, prometheus.yml, grafana datasource
-scripts/          chaos.sh (fault injection), compare.py (Maekawa vs registry)
+scripts/          chaos.sh (fault injection), compare.py (Maekawa vs registry), gen-certs.sh (mTLS)
 ```
 
 ## Current state and next steps
@@ -153,9 +201,14 @@ controlling sector's replicas by B-multicast with FIFO sequence numbers;
 handoffs run in 3 phases through the registry (begin, target accepts, commit),
 abort when the target has no majority, and resume after a crash; the Maekawa
 baseline and comparison script run; the radar shows aircraft (amber while
-transferring), sectors, every node's role/term, and handoff counters.
+transferring), sectors, every node's role/term, and handoff counters; every
+internal link is gRPC with mutual TLS, and only the gateway can write to a
+Raft log.
+
+Known limitation: after an elastic split, only the supervisor can issue
+clearances in the half on the standby cluster (see docs/collins_design.md,
+section 5).
 
 - Elastic split/merge using the standby cluster, sector map in the registry (Issaq)
-- gRPC in place of HTTP/JSON, mTLS (Collins)
 - Scenario files, conflict/stress modes, replay (Mashal)
 - Grafana dashboards (Chimidike)

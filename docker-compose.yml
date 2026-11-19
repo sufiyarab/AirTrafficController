@@ -8,6 +8,11 @@
 #
 # Every Raft node runs the same image. NODE_ID must equal the service name,
 # because nodes and the gateway reach each other by that hostname.
+#
+# Mutual TLS is on by default: the one-shot "certs" service creates ./certs
+# (scripts/gen-certs.sh) before anything else starts, and every service
+# mounts it. MTLS=off docker compose up turns it off (the "before" picture).
+# Demo: docker compose run --rm intruder
 
 name: atc
 
@@ -18,9 +23,17 @@ x-go-image: &go-image
   image: atc/go:dev
   pull_policy: never
 
+# Mutual TLS switch and certificates, shared by every service (internal/mtls).
+x-mtls: &mtls "${MTLS:-on}"
+x-certs: &certs ./certs:/certs:ro
+x-after-certs: &after-certs
+  certs: { condition: service_completed_successfully }
+
 x-node: &node
   <<: *go-image
   command: ["atc-node"]
+  depends_on: *after-certs
+  volumes: [*certs]
   cap_add: [NET_ADMIN]   # lets scripts/chaos.sh add tc netem delay/loss inside a node
   restart: "no"          # a killed node stays down until the chaos script restarts it
   networks: [atc]
@@ -40,76 +53,83 @@ x-peers-standby: &peers-standby "standby-a=standby-a:7000,standby-b=standby-b:70
 
 services:
 
+  # --- One-shot: dev CA and one certificate per service, kept in ./certs ---
+  certs:
+    <<: *go-image
+    command: ["sh", "/gen-certs.sh", "/certs"]
+    volumes: ["./scripts/gen-certs.sh:/gen-certs.sh:ro", "./certs:/certs"]
+    networks: [atc]
+
   # --- Airspace sectors: 4 clusters x 3 replicas ---
   sector-1-a:
     <<: *node
-    environment: { NODE_ID: sector-1-a, CLUSTER: sector-1, PEERS: *peers-sector-1 }
+    environment: { NODE_ID: sector-1-a, CLUSTER: sector-1, PEERS: *peers-sector-1, MTLS: *mtls }
   sector-1-b:
     <<: *node
-    environment: { NODE_ID: sector-1-b, CLUSTER: sector-1, PEERS: *peers-sector-1 }
+    environment: { NODE_ID: sector-1-b, CLUSTER: sector-1, PEERS: *peers-sector-1, MTLS: *mtls }
   sector-1-c:
     <<: *node
-    environment: { NODE_ID: sector-1-c, CLUSTER: sector-1, PEERS: *peers-sector-1 }
+    environment: { NODE_ID: sector-1-c, CLUSTER: sector-1, PEERS: *peers-sector-1, MTLS: *mtls }
   sector-2-a:
     <<: *node
-    environment: { NODE_ID: sector-2-a, CLUSTER: sector-2, PEERS: *peers-sector-2 }
+    environment: { NODE_ID: sector-2-a, CLUSTER: sector-2, PEERS: *peers-sector-2, MTLS: *mtls }
   sector-2-b:
     <<: *node
-    environment: { NODE_ID: sector-2-b, CLUSTER: sector-2, PEERS: *peers-sector-2 }
+    environment: { NODE_ID: sector-2-b, CLUSTER: sector-2, PEERS: *peers-sector-2, MTLS: *mtls }
   sector-2-c:
     <<: *node
-    environment: { NODE_ID: sector-2-c, CLUSTER: sector-2, PEERS: *peers-sector-2 }
+    environment: { NODE_ID: sector-2-c, CLUSTER: sector-2, PEERS: *peers-sector-2, MTLS: *mtls }
   sector-3-a:
     <<: *node
-    environment: { NODE_ID: sector-3-a, CLUSTER: sector-3, PEERS: *peers-sector-3 }
+    environment: { NODE_ID: sector-3-a, CLUSTER: sector-3, PEERS: *peers-sector-3, MTLS: *mtls }
   sector-3-b:
     <<: *node
-    environment: { NODE_ID: sector-3-b, CLUSTER: sector-3, PEERS: *peers-sector-3 }
+    environment: { NODE_ID: sector-3-b, CLUSTER: sector-3, PEERS: *peers-sector-3, MTLS: *mtls }
   sector-3-c:
     <<: *node
-    environment: { NODE_ID: sector-3-c, CLUSTER: sector-3, PEERS: *peers-sector-3 }
+    environment: { NODE_ID: sector-3-c, CLUSTER: sector-3, PEERS: *peers-sector-3, MTLS: *mtls }
   sector-4-a:
     <<: *node
-    environment: { NODE_ID: sector-4-a, CLUSTER: sector-4, PEERS: *peers-sector-4 }
+    environment: { NODE_ID: sector-4-a, CLUSTER: sector-4, PEERS: *peers-sector-4, MTLS: *mtls }
   sector-4-b:
     <<: *node
-    environment: { NODE_ID: sector-4-b, CLUSTER: sector-4, PEERS: *peers-sector-4 }
+    environment: { NODE_ID: sector-4-b, CLUSTER: sector-4, PEERS: *peers-sector-4, MTLS: *mtls }
   sector-4-c:
     <<: *node
-    environment: { NODE_ID: sector-4-c, CLUSTER: sector-4, PEERS: *peers-sector-4 }
+    environment: { NODE_ID: sector-4-c, CLUSTER: sector-4, PEERS: *peers-sector-4, MTLS: *mtls }
 
   # --- Airport tower ---
   tower-a:
     <<: *node
-    environment: { NODE_ID: tower-a, CLUSTER: tower, PEERS: *peers-tower }
+    environment: { NODE_ID: tower-a, CLUSTER: tower, PEERS: *peers-tower, MTLS: *mtls }
   tower-b:
     <<: *node
-    environment: { NODE_ID: tower-b, CLUSTER: tower, PEERS: *peers-tower }
+    environment: { NODE_ID: tower-b, CLUSTER: tower, PEERS: *peers-tower, MTLS: *mtls }
   tower-c:
     <<: *node
-    environment: { NODE_ID: tower-c, CLUSTER: tower, PEERS: *peers-tower }
+    environment: { NODE_ID: tower-c, CLUSTER: tower, PEERS: *peers-tower, MTLS: *mtls }
 
   # --- Airspace registry: who owns each flight, versioned sector map ---
   registry-a:
     <<: *node
-    environment: { NODE_ID: registry-a, CLUSTER: registry, PEERS: *peers-registry }
+    environment: { NODE_ID: registry-a, CLUSTER: registry, PEERS: *peers-registry, MTLS: *mtls }
   registry-b:
     <<: *node
-    environment: { NODE_ID: registry-b, CLUSTER: registry, PEERS: *peers-registry }
+    environment: { NODE_ID: registry-b, CLUSTER: registry, PEERS: *peers-registry, MTLS: *mtls }
   registry-c:
     <<: *node
-    environment: { NODE_ID: registry-c, CLUSTER: registry, PEERS: *peers-registry }
+    environment: { NODE_ID: registry-c, CLUSTER: registry, PEERS: *peers-registry, MTLS: *mtls }
 
   # --- Warm standby cluster: takes over half a sector when one splits ---
   standby-a:
     <<: *node
-    environment: { NODE_ID: standby-a, CLUSTER: standby, PEERS: *peers-standby }
+    environment: { NODE_ID: standby-a, CLUSTER: standby, PEERS: *peers-standby, MTLS: *mtls }
   standby-b:
     <<: *node
-    environment: { NODE_ID: standby-b, CLUSTER: standby, PEERS: *peers-standby }
+    environment: { NODE_ID: standby-b, CLUSTER: standby, PEERS: *peers-standby, MTLS: *mtls }
   standby-c:
     <<: *node
-    environment: { NODE_ID: standby-c, CLUSTER: standby, PEERS: *peers-standby }
+    environment: { NODE_ID: standby-c, CLUSTER: standby, PEERS: *peers-standby, MTLS: *mtls }
 
   # --- Edge services ---
   gateway:
@@ -128,15 +148,25 @@ services:
       # JWT_SECRET means a random one per run (tokens die with the gateway).
       USERS_FILE: /etc/atc/users.json
       JWT_SECRET: "${JWT_SECRET:-}"
+      # Transport for every internal link: grpc (proto/atc.proto; port 9090 on
+      # every node and on the gateway) or http (the original JSON endpoints on
+      # 8080). The simulator and receivers use the same setting. HTTP stays
+      # for the transport comparison: TRANSPORT=http docker compose up
+      TRANSPORT: "${TRANSPORT:-grpc}"
+      MTLS: *mtls   # TRANSPORT=http needs MTLS=off
       CLUSTERS: "sector-1=sector-1-a,sector-1-b,sector-1-c;sector-2=sector-2-a,sector-2-b,sector-2-c;sector-3=sector-3-a,sector-3-b,sector-3-c;sector-4=sector-4-a,sector-4-b,sector-4-c;tower=tower-a,tower-b,tower-c;registry=registry-a,registry-b,registry-c;standby=standby-a,standby-b,standby-c"
     ports: ["8080:8080"]
-    volumes: ["./deploy/users.json:/etc/atc/users.json:ro"]
+    volumes: ["./deploy/users.json:/etc/atc/users.json:ro", *certs]
+    depends_on: *after-certs
     networks: [atc]
 
 
   simulator:
     build: ./sim
     environment:
+      TRANSPORT: "${TRANSPORT:-grpc}"   # grpc: GATEWAY_GRPC, http: GATEWAY
+      MTLS: *mtls
+      GATEWAY_GRPC: gateway:9090
       GATEWAY: http://gateway:8080
       AIRCRAFT: "100"
       TICK: "1.0"
@@ -145,6 +175,7 @@ services:
       SPOOF_X: "100"              # where the spoofer's transmitter is, NM
       SPOOF_Y: "20"
       RECEIVERS: "http://receiver-a:9000,http://receiver-b:9000,http://receiver-c:9000"
+    volumes: [*certs]
     depends_on: [gateway]
     networks: [atc]
 
@@ -153,22 +184,36 @@ services:
   receiver-a:
     build: ./sim
     command: ["python", "receiver.py"]
-    environment: { RECEIVER_ID: receiver-a, RECEIVER_X: "20", RECEIVER_Y: "20", RECEIVER_RANGE_NM: "200", RECEIVER_NOISE_NM: "0.5", GATEWAY: "http://gateway:8080" }
+    environment: { RECEIVER_ID: receiver-a, RECEIVER_X: "20", RECEIVER_Y: "20", RECEIVER_RANGE_NM: "200", RECEIVER_NOISE_NM: "0.5", TRANSPORT: "${TRANSPORT:-grpc}", MTLS: *mtls, GATEWAY_GRPC: "gateway:9090", GATEWAY: "http://gateway:8080" }
+    volumes: [*certs]
     depends_on: [gateway]
     networks: [atc]
 
   receiver-b:
     build: ./sim
     command: ["python", "receiver.py"]
-    environment: { RECEIVER_ID: receiver-b, RECEIVER_X: "180", RECEIVER_Y: "40", RECEIVER_RANGE_NM: "200", RECEIVER_NOISE_NM: "0.5", GATEWAY: "http://gateway:8080" }
+    environment: { RECEIVER_ID: receiver-b, RECEIVER_X: "180", RECEIVER_Y: "40", RECEIVER_RANGE_NM: "200", RECEIVER_NOISE_NM: "0.5", TRANSPORT: "${TRANSPORT:-grpc}", MTLS: *mtls, GATEWAY_GRPC: "gateway:9090", GATEWAY: "http://gateway:8080" }
+    volumes: [*certs]
     depends_on: [gateway]
     networks: [atc]
 
   receiver-c:
     build: ./sim
     command: ["python", "receiver.py"]
-    environment: { RECEIVER_ID: receiver-c, RECEIVER_X: "100", RECEIVER_Y: "190", RECEIVER_RANGE_NM: "200", RECEIVER_NOISE_NM: "0.5", GATEWAY: "http://gateway:8080" }
+    environment: { RECEIVER_ID: receiver-c, RECEIVER_X: "100", RECEIVER_Y: "190", RECEIVER_RANGE_NM: "200", RECEIVER_NOISE_NM: "0.5", TRANSPORT: "${TRANSPORT:-grpc}", MTLS: *mtls, GATEWAY_GRPC: "gateway:9090", GATEWAY: "http://gateway:8080" }
+    volumes: [*certs]
     depends_on: [gateway]
+    networks: [atc]
+
+  # --- mTLS demo (opt-in): docker compose run --rm intruder ---
+  # A rogue container on the network trying to write to the registry's Raft
+  # log four ways (cmd/intruder). It holds receiver-a's real certificate.
+  intruder:
+    <<: *go-image
+    command: ["atc-intruder"]
+    profiles: [demo]
+    environment: { GATEWAY: "http://gateway:8080", AS: receiver-a, REAL_CERT_DIR: /certs }
+    volumes: [*certs]
     networks: [atc]
 
   dashboard:

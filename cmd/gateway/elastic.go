@@ -32,7 +32,6 @@ package main
 // leaves a map the next gateway can read and continue from.
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -192,17 +191,9 @@ func (g *gateway) refreshSectors() {
 	if leader == "" {
 		return
 	}
-	resp, err := g.client.Get("http://" + leader + ":8080/sectors")
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return // a node built before /sectors existed
-	}
-	var m fsm.SectorMap
-	if json.NewDecoder(resp.Body).Decode(&m) != nil {
-		return
+	m, ok, err := g.rpc.Sectors(leader)
+	if err != nil || !ok {
+		return // unreachable, or a node built before the sector map existed
 	}
 	if len(m.Sectors) == 0 {
 		g.seedRegistry()
@@ -252,24 +243,14 @@ func (g *gateway) sectorOp(op, key string, payload any) (fsm.SectorMap, error) {
 		return out, errors.New("registry has no leader")
 	}
 	val, _ := json.Marshal(payload)
-	body, _ := json.Marshal(fsm.Command{Op: op, Key: key, Value: val})
-	resp, err := g.client.Post("http://"+leader+":8080/apply", "application/json", bytes.NewReader(body))
+	rep, err := g.rpc.Apply(leader, fsm.Command{Op: op, Key: key, Value: val})
 	if err != nil {
-		return out, err
+		return out, fmt.Errorf("%s: %w", op, err)
 	}
-	defer resp.Body.Close()
-	var res struct {
-		Error  string         `json:"error"`
-		Result *fsm.SectorMap `json:"result"`
-	}
-	json.NewDecoder(resp.Body).Decode(&res)
-	if resp.StatusCode != http.StatusOK {
-		return out, fmt.Errorf("%s: %s", op, res.Error)
-	}
-	if res.Result == nil {
+	if len(rep.Result) == 0 || string(rep.Result) == "null" || json.Unmarshal(rep.Result, &out) != nil {
 		return out, fmt.Errorf("%s: registry returned no map", op)
 	}
-	return *res.Result, nil
+	return out, nil
 }
 
 // ---------- load ----------

@@ -14,7 +14,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +27,7 @@ import (
 	"time"
 
 	"atc/internal/fsm"
+	"atc/internal/mtls"
 
 	"github.com/gorilla/websocket"
 )
@@ -91,7 +91,7 @@ type gateway struct {
 	clusters map[string][]string    // cluster -> node IDs
 	geo      atomic.Pointer[geoMap] // routing table built from the registry's sector map (elastic.go)
 	el       *elastic               // elastic-sector controller; nil in tests
-	client   *http.Client
+	rpc      nodeClient             // calls to Raft nodes (nodeclient.go)
 	jobs     chan job
 	senders  map[string]chan []position // node ID -> FIFO outbound queue
 
@@ -117,7 +117,7 @@ func main() {
 	g := &gateway{
 		clusters: parseClusters(os.Getenv("CLUSTERS")),
 		el:       newElastic(loadElasticConfig()),
-		client:   &http.Client{Timeout: time.Second},
+		rpc:      nodeClientFromEnv(time.Second),
 		jobs:     make(chan job, 1024),
 		senders:  map[string]chan []position{},
 		nodes:    map[string]nodeStatus{},
@@ -156,8 +156,8 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
-	mux.HandleFunc("POST /api/position", g.position)
-	mux.HandleFunc("POST /api/positions", g.positions)
+	mux.HandleFunc("POST /api/position", httpInput(g.position))
+	mux.HandleFunc("POST /api/positions", httpInput(g.positions))
 	mux.HandleFunc("GET /api/state", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(g.snapshot())
@@ -165,10 +165,11 @@ func main() {
 	mux.HandleFunc("GET /ws", g.ws)
 	mux.HandleFunc("POST /api/login", g.loginHandler)
 	mux.HandleFunc("POST /api/clearance", g.clearanceHandler)
-	mux.HandleFunc("POST /api/observations", g.observationsHandler)
+	mux.HandleFunc("POST /api/observations", httpInput(g.observationsHandler))
 	mux.HandleFunc("POST /api/elastic/split", g.elasticSplit)
 	mux.HandleFunc("POST /api/elastic/merge", g.elasticMerge)
 	mux.HandleFunc("GET /api/safety", g.safetyHandler)
+	go g.serveGRPC(envOr("GRPC_ADDR", ":9090"), mtls.Enabled())
 	addr := envOr("HTTP_ADDR", ":8080")
 	log.Printf("gateway on %s, clusters=%v", addr, g.clusters)
 	log.Fatal(http.ListenAndServe(addr, mux))
@@ -328,13 +329,11 @@ func (g *gateway) flushLoop() {
 // they were queued (FIFO per channel).
 func (g *gateway) sendLoop(id string, ch chan []position) {
 	for batch := range ch {
-		body, _ := json.Marshal(batch)
-		resp, err := g.client.Post("http://"+id+":8080/track", "application/json", bytes.NewReader(body))
+		err := g.rpc.Track(id, batch)
 		g.mu.Lock()
 		if err != nil {
 			g.st.McastDropped++
 		} else {
-			resp.Body.Close()
 			g.st.McastBatches++
 		}
 		g.mu.Unlock()
@@ -423,22 +422,12 @@ func (g *gateway) applyTo(cluster, op, key string, m fsm.Move, out *fsm.Owner) e
 	g.st.RPCs++
 	g.mu.Unlock()
 	val, _ := json.Marshal(m)
-	body, _ := json.Marshal(fsm.Command{Op: op, Key: key, Value: val})
-	resp, err := g.client.Post("http://"+leader+":8080/apply", "application/json", bytes.NewReader(body))
+	rep, err := g.rpc.Apply(leader, fsm.Command{Op: op, Key: key, Value: val})
 	if err != nil {
-		return err
+		return fmt.Errorf("%s %s: %w", cluster, op, err)
 	}
-	defer resp.Body.Close()
-	var res struct {
-		Error  string     `json:"error"`
-		Result *fsm.Owner `json:"result"`
-	}
-	json.NewDecoder(resp.Body).Decode(&res)
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s %s: %s", cluster, op, res.Error)
-	}
-	if out != nil && res.Result != nil {
-		*out = *res.Result
+	if out != nil && len(rep.Result) > 0 && string(rep.Result) != "null" {
+		json.Unmarshal(rep.Result, out)
 	}
 	return nil
 }
@@ -453,12 +442,8 @@ func (g *gateway) pollLoop() {
 				wg.Add(1)
 				go func(id string) {
 					defer wg.Done()
-					st := nodeStatus{ID: id}
-					if resp, err := g.client.Get("http://" + id + ":8080/status"); err == nil {
-						json.NewDecoder(resp.Body).Decode(&st)
-						resp.Body.Close()
-						st.Up = true
-					}
+					st, err := g.rpc.Status(id)
+					st.ID, st.Up = id, err == nil
 					g.mu.Lock()
 					g.nodes[id] = st
 					g.mu.Unlock()
@@ -479,13 +464,8 @@ func (g *gateway) refreshOwners() {
 	if leader == "" {
 		return
 	}
-	resp, err := g.client.Get("http://" + leader + ":8080/owners")
+	owners, err := g.rpc.Owners(leader)
 	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-	var owners map[string]fsm.Owner
-	if json.NewDecoder(resp.Body).Decode(&owners) != nil {
 		return
 	}
 	g.mu.Lock()

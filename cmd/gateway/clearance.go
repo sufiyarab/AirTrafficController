@@ -241,24 +241,13 @@ func (g *gateway) ownerFromRegistry(callsign string) (fsm.Owner, bool, error) {
 	if leader == "" {
 		return fsm.Owner{}, false, errors.New("no leader")
 	}
-	resp, err := g.client.Get("http://" + leader + ":8080/owners")
+	owners, err := g.rpc.Owners(leader)
 	if err != nil {
-		return fsm.Owner{}, false, err
-	}
-	defer resp.Body.Close()
-	var owners map[string]fsm.Owner
-	if err := json.NewDecoder(resp.Body).Decode(&owners); err != nil {
 		return fsm.Owner{}, false, err
 	}
 	o, ok := owners[callsign]
 	return o, ok, nil
 }
-
-// rejectedError means the node committed the command but the state machine
-// refused it, so retrying will not help.
-type rejectedError struct{ msg string }
-
-func (e *rejectedError) Error() string { return e.msg }
 
 // applyCommand commits any command on cluster's leader and returns its log index.
 func (g *gateway) applyCommand(cluster string, cmd fsm.Command) (uint64, error) {
@@ -269,25 +258,11 @@ func (g *gateway) applyCommand(cluster string, cmd fsm.Command) (uint64, error) 
 	g.mu.Lock()
 	g.st.RPCs++
 	g.mu.Unlock()
-	body, _ := json.Marshal(cmd)
-	resp, err := g.client.Post("http://"+leader+":8080/apply", "application/json", strings.NewReader(string(body)))
+	rep, err := g.rpc.Apply(leader, cmd)
 	if err != nil {
-		return 0, err
+		return 0, err // *rejectedError if the state machine refused it
 	}
-	defer resp.Body.Close()
-	var res struct {
-		Error string `json:"error"`
-		Index uint64 `json:"index"`
-	}
-	json.NewDecoder(resp.Body).Decode(&res)
-	switch resp.StatusCode {
-	case http.StatusOK:
-		return res.Index, nil
-	case http.StatusBadRequest:
-		return 0, &rejectedError{res.Error}
-	default: // 421 not leader, 503 commit failed or timed out
-		return 0, fmt.Errorf("%d %s", resp.StatusCode, res.Error)
-	}
+	return rep.Index, nil
 }
 
 // ---------- HTTP ----------

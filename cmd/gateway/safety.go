@@ -358,13 +358,7 @@ func (g *gateway) safetyTick(now time.Time) {
 		if leader == "" {
 			continue
 		}
-		resp, err := g.client.Get("http://" + leader + ":8080/state")
-		if err != nil {
-			continue
-		}
-		var state map[string]json.RawMessage
-		err = json.NewDecoder(resp.Body).Decode(&state)
-		resp.Body.Close()
+		state, err := g.rpc.State(leader)
 		if err != nil {
 			continue
 		}

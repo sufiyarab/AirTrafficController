@@ -2,3 +2,6 @@ results/
 dashboard/node_modules/
 dashboard/dist/
 sim/recordings/
+.DS_StoreS
+*.patch
+.DS_Store
