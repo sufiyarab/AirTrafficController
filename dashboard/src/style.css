@@ -25,3 +25,8 @@ td { padding: 2px 6px; border-bottom: 1px solid #1f3a2a; }
 .elastic .DRAINING { color: #ffb000; }
 .elastic .STANDBY { color: #5fa57a; }
 
+.safety .inv-mark { width: 1.2em; font-weight: bold; vertical-align: top; }
+.safety .inv-ok .inv-mark { color: #7fd69a; }
+.safety .inv-bad, .safety .inv-bad .inv-mark { color: #ff6b6b; }
+.safety .inv-bad .hint { color: #ff9b9b; }
+.safety .inv-count { color: #5fa57a; font-size: 12px; white-space: nowrap; vertical-align: top; text-align: right; }

@@ -95,20 +95,22 @@ type gateway struct {
 	jobs     chan job
 	senders  map[string]chan []position // node ID -> FIFO outbound queue
 
-	mu       sync.Mutex
-	nodes    map[string]nodeStatus          // node ID -> last status
-	aircraft map[string]position            // callsign -> latest report
-	outbox   map[string]map[string]position // controlling sector -> callsign -> report
-	owners   map[string]fsm.Owner           // registry's ownership table (cached)
-	smap     fsm.SectorMap                  // registry's sector map (cached)
-	seen     map[string]time.Time           // callsign -> when it last reported
-	inflight map[string]bool                // callsigns with a job queued or running
-	ready    map[string]readiness           // cluster -> Ready flag (ready.go)
-	clr      clearanceState                 // clearance buffer and history (clearance.go)
-	ver      *verifier                      // ghost-aircraft detection, nil if off (verify.go)
-	auth     *authenticator                 // controller login, nil if off (auth.go)
-	sec      securityStats
-	st       stats
+	mu        sync.Mutex
+	nodes     map[string]nodeStatus          // node ID -> last status
+	aircraft  map[string]position            // callsign -> latest report
+	outbox    map[string]map[string]position // controlling sector -> callsign -> report
+	owners    map[string]fsm.Owner           // registry's ownership table (cached)
+	smap      fsm.SectorMap                  // registry's sector map (cached)
+	seen      map[string]time.Time           // callsign -> when it last reported
+	inflight  map[string]bool                // callsigns with a job queued or running
+	ready     map[string]readiness           // cluster -> Ready flag (ready.go)
+	clr       clearanceState                 // clearance buffer and history (clearance.go)
+	ver       *verifier                      // ghost-aircraft detection, nil if off (verify.go)
+	auth      *authenticator                 // controller login, nil if off (auth.go)
+	sec       securityStats
+	st        stats
+	safety    *safetyMonitor       // live safety-invariant checks, nil in tests (safety.go)
+	firstSeen map[string]time.Time // callsign -> when the gateway first saw it (safety.go)
 }
 
 func main() {
@@ -127,6 +129,7 @@ func main() {
 		ready:    map[string]readiness{},
 		ver:      verifierFromEnv(),
 		auth:     authFromEnv(),
+		safety:   newSafetyMonitor(time.Now()),
 	}
 	g.geo.Store(fallbackGeo) // until the registry's map is read
 	for c, ids := range g.clusters {
@@ -146,6 +149,7 @@ func main() {
 		go g.verifyLoop()
 	}
 	go g.elasticLoop()
+	go g.safetyLoop()
 	for range 4 {
 		go g.worker()
 	}
@@ -164,6 +168,7 @@ func main() {
 	mux.HandleFunc("POST /api/observations", g.observationsHandler)
 	mux.HandleFunc("POST /api/elastic/split", g.elasticSplit)
 	mux.HandleFunc("POST /api/elastic/merge", g.elasticMerge)
+	mux.HandleFunc("GET /api/safety", g.safetyHandler)
 	addr := envOr("HTTP_ADDR", ":8080")
 	log.Printf("gateway on %s, clusters=%v", addr, g.clusters)
 	log.Fatal(http.ListenAndServe(addr, mux))
@@ -258,6 +263,7 @@ func (g *gateway) accept(p position) {
 		g.seen = map[string]time.Time{}
 	}
 	g.seen[p.Callsign] = time.Now()
+	g.firstSeenLocked(p.Callsign, time.Now())
 	if p.Owner != "" {
 		if g.outbox[p.Owner] == nil {
 			g.outbox[p.Owner] = map[string]position{}
@@ -534,6 +540,8 @@ type picture struct {
 
 	Security securityStats `json:"security"` // logins and refused clearances (auth.go)
 	AuthOn   bool          `json:"auth"`     // whether clearances need a login
+
+	Safety *safetyPicture `json:"safety,omitempty"` // live safety-invariant panel (safety.go)
 }
 
 func (g *gateway) snapshot() picture {
@@ -550,6 +558,10 @@ func (g *gateway) snapshot() picture {
 	pic.Receivers = g.ver.receiverSnapshot()
 	pic.Alerts = g.ver.alerts()
 	pic.Security, pic.AuthOn = g.sec, g.auth != nil
+	if g.safety != nil {
+		sp := g.safety.picture()
+		pic.Safety = &sp
+	}
 	if g.ver != nil {
 		st := g.ver.st
 		pic.Verify = &st
