@@ -107,8 +107,8 @@ the checks catch it.
 
 ```bash
 docker compose build
-python3 scripts/experiments/run.py all       # about 25 minutes; or one of:
-                                             # failover scaling surge ghost chaos
+python3 scripts/experiments/run.py all       # about 30 minutes; or one of:
+                                             # failover scaling surge ghost chaos transport
 pip install matplotlib
 python3 scripts/experiments/plot.py --summary   # results/figures/*.png + summary.json
 ```

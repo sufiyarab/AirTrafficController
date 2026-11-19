@@ -10,7 +10,8 @@ Run from the repo root, with the images already built (docker compose build):
     python3 scripts/experiments/run.py surge      # elastic split and merge timeline
     python3 scripts/experiments/run.py ghost      # spoof detection time, receiver loss
     python3 scripts/experiments/run.py chaos      # safety invariants under mixed faults
-    python3 scripts/experiments/run.py all        # all five, about 25 minutes
+    python3 scripts/experiments/run.py transport  # HTTP/JSON vs gRPC vs gRPC + mTLS
+    python3 scripts/experiments/run.py all        # all six, about 30 minutes
 
 Only the Python standard library and the docker CLI are needed. Every
 experiment ends with `docker compose down -v`.
@@ -387,6 +388,90 @@ def ghost(args):
     return save("ghost", out)
 
 
+# ---------- 6. transport: HTTP/JSON vs gRPC vs gRPC + mTLS ----------
+
+TRANSPORTS = [  # label, TRANSPORT, MTLS
+    ("HTTP/JSON", "http", "off"),
+    ("gRPC", "grpc", "off"),
+    ("gRPC + mTLS", "grpc", "on"),
+]
+
+
+def pct(xs, q):
+    xs = sorted(xs)
+    if not xs:
+        return None
+    k = (len(xs) - 1) * q
+    lo = int(k)
+    return xs[lo] + (xs[min(lo + 1, len(xs) - 1)] - xs[lo]) * (k - lo)
+
+
+def transport(args):
+    """Same fleet, three transports between the gateway and the nodes (and the
+    simulator/receivers and the gateway). Separates what gRPC changes from
+    what TLS costs.
+
+    Two latencies, both ending in a Raft commit over the transport under test:
+      - clearance round trip, timed by this script: POST /api/clearance ->
+        gateway reads the owner from the registry -> commits on the sector
+        leader -> reply. Many samples (one every 200 ms).
+      - handoff, timed by the gateway: begin -> accept -> commit, three Raft
+        commits on two clusters. Fewer samples (depends on traffic).
+    The script -> gateway hop is plain HTTP in all three runs, so it is the
+    same constant in every column."""
+    runs = []
+    f = override("transport", f"services:\n  simulator:\n    environment:\n      AIRCRAFT: \"{args.aircraft}\"\n")
+    files = ("docker-compose.yml", f)
+    for label, tr, mtls in TRANSPORTS:
+        env = {"TRANSPORT": tr, "MTLS": mtls}
+        up(files, env=env, want_aircraft=args.aircraft // 2)
+        time.sleep(args.warmup)
+        token = login()
+        clr, refused, samples = [], 0, []
+        prev = state()["handoff"]
+        t_end, next_sample = time.time() + args.seconds, time.time() + 2
+        while time.time() < t_end:
+            s = state()
+            targets = [cs for c in SECTORS for cs in owned_by(s or {}, c)]
+            if targets:
+                t0 = time.time()
+                code, r = http("POST", "/api/clearance", {"callsign": random.choice(targets), "instruction": "MAINTAIN FL300"}, token)
+                ms = (time.time() - t0) * 1000
+                if code == 200 and (r or {}).get("status") == "committed":
+                    clr.append(ms)
+                else:
+                    refused += 1  # pending (no leader), 409 (handoff running), ...: not a transport timing
+            time.sleep(0.2)
+            if time.time() >= next_sample:
+                next_sample += 2
+                s = state()
+                h = s["handoff"]
+                dn = h["handoffs"] - prev["handoffs"]
+                mean = (h["avg_ms"] * h["handoffs"] - prev["avg_ms"] * prev["handoffs"]) / dn if dn > 0 else None
+                cpu = docker_stats(["gateway"])
+                samples.append({"t": time.time(), "handoffs": dn, "interval_mean_ms": mean,
+                                "multicast": h["multicast_batches"] - prev["multicast_batches"],
+                                "dropped": h["multicast_dropped"] - prev["multicast_dropped"],
+                                "gateway_cpu": cpu.get("gateway", {}).get("cpu_pct")})
+                prev = h
+        total = sum(x["handoffs"] for x in samples)
+        wsum = sum(x["interval_mean_ms"] * x["handoffs"] for x in samples if x["interval_mean_ms"] is not None)
+        run = {"label": label, "transport": tr, "mtls": mtls, "aircraft": args.aircraft, "seconds": args.seconds,
+               "clearance_ms": clr, "clearances": len(clr), "clearances_not_committed": refused,
+               "clearance_p50_ms": pct(clr, 0.5), "clearance_p95_ms": pct(clr, 0.95),
+               "handoffs": total, "mean_handoff_ms": wsum / total if total else None,
+               "multicast_per_s": sum(x["multicast"] for x in samples) / args.seconds,
+               "multicast_dropped": sum(x["dropped"] for x in samples),
+               "gateway_cpu_avg": avg([x["gateway_cpu"] for x in samples]),
+               "samples": samples, "safety": safety_summary()}
+        log(f"{label}: clearance p50 {fmt(run['clearance_p50_ms'])} ms, p95 {fmt(run['clearance_p95_ms'])} ms "
+            f"({len(clr)} committed), handoff mean {fmt(run['mean_handoff_ms'])} ms ({total}), "
+            f"gateway CPU {fmt(run['gateway_cpu_avg'])}%")
+        runs.append(run)
+        down(files)
+    return save("transport", {"runs": runs})
+
+
 # ---------- 5. safety invariants under mixed faults ----------
 
 def chaos(args):
@@ -457,15 +542,16 @@ def chaos(args):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("experiment", choices=["failover", "scaling", "surge", "ghost", "chaos", "all"])
+    p.add_argument("experiment", choices=["failover", "scaling", "surge", "ghost", "chaos", "transport", "all"])
     p.add_argument("--rounds", type=int, default=3, help="failover: crashes per cluster")
     p.add_argument("--sizes", type=int, nargs="+", default=[50, 100, 200, 400], help="scaling: fleet sizes")
     p.add_argument("--seconds", type=int, default=None, help="measuring time per run")
     p.add_argument("--warmup", type=int, default=15, help="scaling: seconds before measuring")
     p.add_argument("--ghosts", type=int, default=5, help="ghost: number of spoofed aircraft")
+    p.add_argument("--aircraft", type=int, default=100, help="transport: fleet size")
     args = p.parse_args()
-    todo = ["failover", "scaling", "surge", "ghost", "chaos"] if args.experiment == "all" else [args.experiment]
-    defaults = {"scaling": 60, "surge": 150, "ghost": 40}
+    todo = ["failover", "scaling", "surge", "ghost", "chaos", "transport"] if args.experiment == "all" else [args.experiment]
+    defaults = {"scaling": 60, "surge": 150, "ghost": 40, "transport": 90}
     sec = args.seconds
     for name in todo:
         args.seconds = sec or defaults.get(name, 60)
