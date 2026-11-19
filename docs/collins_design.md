@@ -509,8 +509,9 @@ All in `dashboard/src/`. Split `App.jsx` into components as it grows.
   aircraft and follows it; it flips to the left (or upwards) near the edges
   and closes on ×, Esc, or a click elsewhere. The side panel keeps one
   "selected" line. Clicks select the nearest aircraft within 18 screen
-  pixels, and above 40 aircraft only the hovered, selected, `SUSPECT` and
-  `TRANSFERRING` ones are labelled ("all labels" turns every label back on).
+  pixels. Every aircraft is labelled with its callsign; above 40 aircraft an
+  "all labels" checkbox (ticked by default) can be unticked to label only the
+  hovered, selected, `SUSPECT` and `TRANSFERRING` ones.
 - **Pending and recent clearances** list with status (pending, committed with
   log index, expired, rejected).
 - **Cluster table**: a Ready column per cluster and the buffer size.

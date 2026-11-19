@@ -1,7 +1,12 @@
 body { margin: 0; background: #0b1410; color: #b8f5c8; font: 14px/1.4 ui-monospace, Menlo, Consolas, monospace; }
-.layout { display: flex; gap: 16px; padding: 16px; flex-wrap: wrap; }
-canvas { background: #06100b; border: 1px solid #1f3a2a; max-width: 100%; height: auto; }
+.layout { display: flex; gap: 0; padding: 16px; align-items: flex-start; }
+/* Radar: sized by the divider (App.jsx, useRadarSize). */
+canvas { background: #06100b; border: 1px solid #1f3a2a; display: block; box-sizing: border-box; }
 .side { min-width: 280px; flex: 1; }
+/* Drag handle between radar and side panel. */
+.divider { flex: 0 0 16px; align-self: stretch; min-height: 200px; cursor: col-resize; position: relative; touch-action: none; }
+.divider::after { content: ''; position: absolute; left: 7px; top: 0; bottom: 0; width: 2px; background: #1f3a2a; }
+.divider:hover::after, .divider:active::after { background: #3c8a5c; }
 h1 { font-size: 16px; margin: 0 0 8px; }
 h2 { font-size: 13px; margin: 16px 0 4px; color: #7fd69a; }
 table { border-collapse: collapse; width: 100%; }
@@ -32,7 +37,7 @@ td { padding: 2px 6px; border-bottom: 1px solid #1f3a2a; }
 .safety .inv-count { color: #5fa57a; font-size: 12px; white-space: nowrap; vertical-align: top; text-align: right; }
 
 /* Radar with the clearance popover floating next to the selected aircraft. */
-.radar-wrap { position: relative; align-self: flex-start; max-width: 100%; }
+.radar-wrap { position: relative; flex: none; }
 .popover { position: absolute; width: 300px; box-sizing: border-box; z-index: 10; padding: 2px 10px 10px;
   background: rgba(8, 22, 15, 0.96); border: 1px solid #3c8a5c; box-shadow: 0 4px 18px rgba(0, 0, 0, 0.6); }
 .popover h2 { margin-top: 8px; padding-right: 20px; }
