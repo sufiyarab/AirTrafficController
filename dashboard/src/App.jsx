@@ -1,7 +1,54 @@
 import { useEffect, useRef, useState } from 'react'
 
 const SIZE = 200 // NM, must match the gateway's airspace
-const PX = 640
+const PX = 900 // drawing coordinates; the canvas is redrawn at whatever size it is shown, so it stays sharp
+const SIDE_MIN = 300 // px kept for the side panel when the radar is dragged wider
+const RADAR_MIN = 320
+const SIZE_KEY = 'atc.radarSize'
+
+// Radar size that fits the window, as before the divider existed.
+function fitSize() {
+  return Math.max(RADAR_MIN, Math.min(PX, window.innerHeight - 34, window.innerWidth - SIDE_MIN - 48))
+}
+
+// Radar size in CSS pixels: chosen by dragging the divider, remembered in this
+// browser (localStorage can be unavailable, so it is optional).
+function useRadarSize() {
+  const [size, setSize] = useState(() => {
+    try {
+      const v = Number(localStorage.getItem(SIZE_KEY))
+      if (v >= RADAR_MIN) return v
+    } catch { /* no storage: use the fitted size */ }
+    return fitSize()
+  })
+  const choose = (v) => {
+    const clamped = Math.round(Math.max(RADAR_MIN, Math.min(v, window.innerWidth - SIDE_MIN - 48)))
+    setSize(clamped)
+    try { localStorage.setItem(SIZE_KEY, String(clamped)) } catch { /* ignore */ }
+  }
+  const reset = () => {
+    try { localStorage.removeItem(SIZE_KEY) } catch { /* ignore */ }
+    setSize(fitSize())
+  }
+  return [size, choose, reset]
+}
+
+// Vertical divider between the radar and the side panel. Drag to resize the
+// radar; double-click to fit it to the window again.
+function Divider({ size, onResize, onReset }) {
+  const start = useRef(null)
+  return (
+    <div className="divider" role="separator" aria-orientation="vertical" aria-valuenow={size}
+      title="Drag to resize the radar · double-click to fit the window"
+      onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); start.current = { x: e.clientX, size } }}
+      onPointerMove={(e) => start.current && onResize(start.current.size + e.clientX - start.current.x)}
+      onPointerUp={() => { start.current = null }}
+      onDoubleClick={onReset} />
+  )
+}
+const CLICK_RADIUS = 18 // screen pixels, whatever size the canvas is shown at
+const LABEL_ALL_UP_TO = 40 // above this many aircraft, "all labels" can be unticked to label only the ones that matter (see wantsLabel)
+const POPOVER_W = 300 // px, matches .popover in style.css
 
 // Receives the gateway's picture over a WebSocket, reconnecting on drop.
 function usePicture() {
@@ -35,10 +82,33 @@ function aircraftColor(ac) {
   return '#b8f5c8'
 }
 
-function Radar({ pic, selected, onSelect, coverage }) {
+// With many aircraft, a label on every one hides the picture. Label the ones a
+// controller is looking at or should look at; the rest show as a dot and a
+// leader line.
+function wantsLabel(ac, n, allLabels, selected, hovered) {
+  return allLabels || n <= LABEL_ALL_UP_TO || ac.callsign === selected || ac.callsign === hovered ||
+    ac.verify === 'SUSPECT' || ac.status === 'TRANSFERRING'
+}
+
+// Radar canvas, plus the clearance popover floating next to the selected
+// aircraft (children). The popover follows the aircraft on every update and
+// flips to its left side, or upwards, near the edges.
+function Radar({ pic, selected, onSelect, coverage, allLabels, size, children }) {
   const ref = useRef(null)
+  const wrap = useRef(null)
+  const [hovered, setHovered] = useState(null)
+  const dpr = window.devicePixelRatio || 1
+  const [, setResized] = useState(0)
+  useEffect(() => { // re-place the popover when the canvas is resized
+    const ro = new ResizeObserver(() => setResized((n) => n + 1))
+    ro.observe(ref.current)
+    return () => ro.disconnect()
+  }, [])
   useEffect(() => {
     const ctx = ref.current.getContext('2d')
+    // Draw in PX coordinates, scaled to the canvas's real pixels.
+    const k = ref.current.width / PX
+    ctx.setTransform(k, 0, 0, k, 0, 0)
     const s = PX / SIZE
     const toY = (y) => PX - y * s // north up
     ctx.clearRect(0, 0, PX, PX)
@@ -78,6 +148,7 @@ function Radar({ pic, selected, onSelect, coverage }) {
       ctx.fillText(label, x + 8 + w > PX ? x - 8 - w : x + 8, y + 4) // keep labels on the canvas
     }
 
+    const n = pic?.aircraft?.length ?? 0
     for (const ac of pic?.aircraft ?? []) {
       const x = ac.x * s, y = toY(ac.y)
       const color = aircraftColor(ac)
@@ -87,30 +158,65 @@ function Radar({ pic, selected, onSelect, coverage }) {
       ctx.strokeStyle = color
       ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + 10 * Math.sin(r), y - 10 * Math.cos(r)); ctx.stroke()
       ctx.fillStyle = ac.verify === 'SUSPECT' ? '#ff4d4d' : '#7fd69a'
-      ctx.fillText(`${ac.callsign}${ac.verify === 'SUSPECT' ? '?' : ''} ${Math.round(ac.alt / 100)}`, x + 5, y - 5)
+      if (wantsLabel(ac, n, allLabels, selected, hovered)) {
+        ctx.fillText(`${ac.callsign}${ac.verify === 'SUSPECT' ? '?' : ''} ${Math.round(ac.alt / 100)}`, x + 5, y - 5)
+      }
       if (ac.callsign === selected) { // ring around the aircraft being cleared
         ctx.strokeStyle = '#ffffff'
         ctx.beginPath(); ctx.arc(x, y, 9, 0, 2 * Math.PI); ctx.stroke()
       }
       ctx.strokeStyle = '#1f5a3a'
     }
-  }, [pic, selected, coverage])
+  }, [pic, selected, coverage, allLabels, hovered, size])
 
-  // Click selects the nearest aircraft within 12 px. The canvas can be shown
-  // smaller than PX (max-width: 100%), so scale the click back to canvas pixels.
-  const click = (e) => {
+  // The aircraft nearest to a mouse event, within CLICK_RADIUS screen pixels.
+  // The canvas can be shown smaller than PX (max-width: 100%), so the event is
+  // scaled back to canvas pixels.
+  const nearest = (e) => {
     const rect = ref.current.getBoundingClientRect()
-    const cx = ((e.clientX - rect.left) * PX) / rect.width
-    const cy = ((e.clientY - rect.top) * PX) / rect.height
+    const k = PX / rect.width
+    const cx = (e.clientX - rect.left) * k
+    const cy = (e.clientY - rect.top) * k
     const s = PX / SIZE
-    let best = null, bestD = 12
+    let best = null, bestD = CLICK_RADIUS * k
     for (const ac of pic?.aircraft ?? []) {
       const d = Math.hypot(ac.x * s - cx, PX - ac.y * s - cy)
       if (d < bestD) { best = ac.callsign; bestD = d }
     }
-    onSelect(best)
+    return best
   }
-  return <canvas ref={ref} width={PX} height={PX} onClick={click} style={{ cursor: 'crosshair' }} />
+
+  // Popover position in CSS pixels, from the aircraft's position on the canvas
+  // as it is shown now.
+  let pop = null
+  const ac = (pic?.aircraft ?? []).find((a) => a.callsign === selected)
+  if (ac && children && ref.current && wrap.current) {
+    const rect = ref.current.getBoundingClientRect()
+    const box = wrap.current.getBoundingClientRect()
+    const k = rect.width / PX, s = PX / SIZE
+    const ax = rect.left - box.left + ac.x * s * k
+    const ay = rect.top - box.top + (PX - ac.y * s) * k
+    const right = ax + 16 + POPOVER_W <= box.width
+    pop = {
+      left: right ? ax + 16 : Math.max(0, ax - 16 - POPOVER_W),
+      top: ay > box.height * 0.6 ? undefined : Math.max(0, ay - 24),
+      bottom: ay > box.height * 0.6 ? Math.max(0, box.height - ay - 24) : undefined,
+    }
+  }
+
+  return (
+    <div className="radar-wrap" ref={wrap}>
+      <canvas ref={ref} width={Math.round(size * dpr)} height={Math.round(size * dpr)}
+        style={{ width: size, height: size, cursor: hovered ? 'pointer' : 'crosshair' }}
+        onClick={(e) => onSelect(nearest(e))}
+        onMouseMove={(e) => setHovered(nearest(e))}
+        onMouseLeave={() => setHovered(null)} />
+      {pop && <div className="popover" style={pop} role="dialog" aria-label={`clearance for ${selected}`}>
+        <button className="close" onClick={() => onSelect(null)} aria-label="close">×</button>
+        {children}
+      </div>}
+    </div>
+  )
 }
 
 const PRESETS = ['CLIMB FL350', 'DESCEND FL250', 'HEADING 090', 'HEADING 270', 'REDUCE SPEED 250']
@@ -210,7 +316,7 @@ function ClearanceForm({ pic, selected, session, setSession }) {
     }
   }
 
-  if (!selected) return <div className="hint">Click an aircraft on the radar to issue a clearance.</div>
+  if (!selected) return null
   const blocked = blockedReason(pic, ac, session)
   return (
     <div className="clearance-form">
@@ -434,10 +540,42 @@ function Handoffs({ pic }) {
   )
 }
 
+// One line in the side panel for the selected aircraft; the form itself is
+// in the popover next to it on the radar.
+function Selected({ pic, selected, onSelect }) {
+  if (!selected) return <div className="hint">Click an aircraft on the radar to issue a clearance.</div>
+  const ac = (pic?.aircraft ?? []).find((a) => a.callsign === selected)
+  return (
+    <div className="hint selected-line">
+      selected <b>{selected}</b>
+      {ac ? ` · ${ac.owner || 'unclaimed'} · FL${Math.round(ac.alt / 100)}${ac.verify ? ` · ${ac.verify}` : ''}` : ' · no longer on the radar'}
+      {' '}<button onClick={() => onSelect(null)}>clear</button>
+    </div>
+  )
+}
+
 export default function App() {
   const [pic, connected] = usePicture()
   const [selected, setSelected] = useState(null)
   const [coverage, setCoverage] = useState(false)
+  const [radarSize, setRadarSize, fitRadar] = useRadarSize()
+  const [allLabels, setAllLabels] = useState(true) // every aircraft named; untick to declutter a busy radar
+  // Esc closes the clearance popover.
+  useEffect(() => {
+    if (!selected) return
+    const onKey = (e) => e.key === 'Escape' && setSelected(null)
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [selected])
+  // A click outside the radar and the popover closes it. The radar's own
+  // click already selects another aircraft or nothing; the side panel's
+  // alert list selects after this runs (mousedown comes before click).
+  useEffect(() => {
+    if (!selected) return
+    const onDown = (e) => { if (!e.target.closest('.radar-wrap')) setSelected(null) }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [selected])
   const [session, setSession] = useState(null) // login response: token, username, role, sectors
   // Drop the session once the token has expired, rather than waiting for a 401.
   useEffect(() => {
@@ -445,12 +583,19 @@ export default function App() {
   }, [pic, session])
   return (
     <div className="layout">
-      <Radar pic={pic} selected={selected} onSelect={setSelected} coverage={coverage} />
+      <Radar pic={pic} selected={selected} onSelect={setSelected} coverage={coverage} allLabels={allLabels} size={radarSize}>
+        <ClearanceForm key={selected} pic={pic} selected={selected} session={session} setSession={setSession} />
+      </Radar>
+      <Divider size={radarSize} onResize={setRadarSize} onReset={fitRadar} />
       <div className="side">
         <h1>Air Traffic Controller but Different</h1>
-        <div className="status">{connected ? 'live' : 'connecting to gateway...'} · {pic?.aircraft?.length ?? 0} aircraft</div>
+        <div className="status">{connected ? 'live' : 'connecting to gateway...'} · {pic?.aircraft?.length ?? 0} aircraft
+          {(pic?.aircraft?.length ?? 0) > LABEL_ALL_UP_TO && <label className="toggle">
+            <input type="checkbox" checked={allLabels} onChange={(e) => setAllLabels(e.target.checked)} /> all labels
+          </label>}
+        </div>
         <Login pic={pic} session={session} setSession={setSession} />
-        <ClearanceForm pic={pic} selected={selected} session={session} setSession={setSession} />
+        <Selected pic={pic} selected={selected} onSelect={setSelected} />
         <Alerts pic={pic} coverage={coverage} setCoverage={setCoverage} onSelect={setSelected} />
         <Clearances pic={pic} />
         <Handoffs pic={pic} />
