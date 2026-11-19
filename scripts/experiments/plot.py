@@ -117,6 +117,51 @@ def plot_scaling(d, summary):
                           {"safety_ok": (r.get("safety") or {}).get("ok")} for r in runs]
 
 
+# ---------- transport ----------
+
+def plot_transport(d, summary):
+    runs = d["runs"]
+    labels = [r["label"] for r in runs]
+    colors = [SERIES[i] for i in range(len(runs))]  # one colour per transport, fixed order
+    fig, axes = plt.subplots(1, 3, figsize=(9, 2.8))
+
+    ax = axes[0]  # clearance latency: box per transport
+    data = [r["clearance_ms"] or [0] for r in runs]
+    bp = ax.boxplot(data, widths=0.5, showfliers=False, patch_artist=True, medianprops={"color": INK})
+    for box, c in zip(bp["boxes"], colors):
+        box.set_facecolor(c)
+        box.set_alpha(0.75)
+        box.set_edgecolor(c)
+    for i, r in enumerate(runs, 1):
+        if r["clearance_p50_ms"] is not None:
+            ax.annotate(f"{r['clearance_p50_ms']:.1f}", (i, r["clearance_p50_ms"]), textcoords="offset points",
+                        xytext=(16, -3), fontsize=8, color=INK2)
+    ax.set_xticks(range(1, len(runs) + 1), labels)
+    ax.set_title("Clearance round trip (ms)")
+
+    for ax, (key, title) in zip(axes[1:], [("mean_handoff_ms", "Handoff latency (mean, ms)"),
+                                            ("gateway_cpu_avg", "Gateway CPU (%)")]):
+        ys = [r[key] for r in runs]
+        ax.bar(labels, [y or 0 for y in ys], color=colors, width=0.55, zorder=3)
+        for x, (y, r) in enumerate(zip(ys, runs)):
+            # Missing is not zero: say so instead of drawing a 0 bar.
+            text = "no data" if y is None else f"{y:.1f}"
+            if key == "mean_handoff_ms":
+                text += f"\nn={r['handoffs']}"
+            ax.annotate(text, (x, y or 0), textcoords="offset points", xytext=(0, 3), ha="center", fontsize=8, color=INK2)
+        ax.set_title(title)
+        ax.set_ylim(0, max([y for y in ys if y is not None] + [1]) * 1.35)
+    for ax in axes:
+        ax.tick_params(axis="x", labelsize=8)
+        ax.grid(axis="x", visible=False)
+    save(fig, "transport.png")
+    summary["transport"] = [{k: (round(r[k], 2) if isinstance(r[k], float) else r[k])
+                             for k in ("label", "aircraft", "clearances", "clearance_p50_ms", "clearance_p95_ms",
+                                       "handoffs", "mean_handoff_ms", "multicast_per_s", "multicast_dropped",
+                                       "gateway_cpu_avg")} |
+                            {"safety_ok": (r.get("safety") or {}).get("ok")} for r in runs]
+
+
 # ---------- surge ----------
 
 def plot_surge(d, summary):
@@ -226,7 +271,7 @@ def main():
     args = p.parse_args()
     summary = {}
     for name, fn in (("failover", plot_failover), ("scaling", plot_scaling), ("surge", plot_surge),
-                     ("ghost", plot_ghost), ("chaos", plot_chaos)):
+                     ("ghost", plot_ghost), ("chaos", plot_chaos), ("transport", plot_transport)):
         d, src = newest(name)
         if d is None:
             print(f"no results/{name}-*.json yet, skipping")
