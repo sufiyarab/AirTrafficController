@@ -218,6 +218,7 @@ func (g *gateway) tryClearance(c *clearance) outcome {
 		"id": c.ID, "callsign": c.Callsign, "instruction": c.Instruction,
 		"issued_by": c.IssuedBy, "sector": sector, "issued_at_ms": c.CreatedMs,
 	})
+	start := time.Now()
 	idx, err := g.applyCommand(o.Sector, fsm.Command{Op: "set", Key: "clearance/" + c.Callsign + "/" + c.ID, Value: val})
 	var rej *rejectedError
 	switch {
@@ -228,6 +229,7 @@ func (g *gateway) tryClearance(c *clearance) outcome {
 		// is safe because the key is idempotent.
 		return outcome{kind: outNotReady, cluster: o.Sector, reason: o.Sector + ": " + err.Error(), sector: sector}
 	}
+	g.safetyCommitted(c, sector, o, start) // still holding the aircraft's lock
 	return outcome{kind: outCommitted, sector: sector, index: idx}
 }
 
@@ -329,6 +331,7 @@ func (g *gateway) clearanceHandler(w http.ResponseWriter, r *http.Request) {
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.safetyIssuedLocked()
 	c.UpdatedMs = now
 	if out.sector != "" {
 		c.Sector = out.sector

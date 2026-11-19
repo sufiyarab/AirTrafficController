@@ -84,6 +84,39 @@ Tick the "coverage" box on the dashboard to draw each receiver's 200 NM
 range. Tunables: `VERIFY_THRESHOLD_NM` (gateway, default 3),
 `RECEIVER_NOISE_NM` (receivers, default 0.5).
 
+## Safety-invariant panel
+
+The "safety invariants" panel on the dashboard checks five rules every second
+against what the clusters actually hold (`cmd/gateway/safety.go`):
+
+| Rule | What is checked |
+|---|---|
+| One controller per aircraft | every tracked aircraft has exactly one owner in the registry, and that sector has airspace |
+| One leader per term | no Raft cluster has two leaders in the same term |
+| Clearances only from the owner | each clearance committed while its sector owned the aircraft (registry re-read after the commit), and every clearance record in a sector's log names that sector |
+| No clearance to a ghost | no clearance commits for an aircraft that was already SUSPECT |
+| No clearance lost | issued = committed + rejected + expired + pending, and every committed clearance is still in its sector's replicated state |
+
+Green means the rule held at every check since the gateway started; a broken
+rule stays red and shows what broke it. The same data is at
+`GET /api/safety`. Kill a leader or trigger a surge and the panel should stay
+green. `go test ./cmd/gateway -run Safety` breaks each rule on purpose to show
+the checks catch it.
+
+## Experiments and graphs
+
+```bash
+docker compose build
+python3 scripts/experiments/run.py all       # about 25 minutes; or one of:
+                                             # failover scaling surge ghost chaos
+pip install matplotlib
+python3 scripts/experiments/plot.py --summary   # results/figures/*.png + summary.json
+```
+
+Each experiment starts the stack itself, saves raw JSON to `results/`, and
+ends with `docker compose down -v`. See the docstring at the top of
+`scripts/experiments/run.py` for what each one measures.
+
 ## Compare the mutual exclusion approaches
 
 ```bash
@@ -125,4 +158,4 @@ transferring), sectors, every node's role/term, and handoff counters.
 - Elastic split/merge using the standby cluster, sector map in the registry (Issaq)
 - gRPC in place of HTTP/JSON, mTLS (Collins)
 - Scenario files, conflict/stress modes, replay (Mashal)
-- Safety-invariant panel, Grafana dashboards, more experiments (Chimidike)
+- Grafana dashboards (Chimidike)

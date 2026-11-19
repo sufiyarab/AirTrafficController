@@ -1,0 +1,4 @@
+# Keep shell and Python scripts runnable on Mac/Linux/WSL even when a
+# Windows checkout converts line endings.
+*.sh text eol=lf
+*.py text eol=lf

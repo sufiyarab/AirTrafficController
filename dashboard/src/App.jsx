@@ -354,6 +354,44 @@ function Alerts({ pic, coverage, setCoverage, onSelect }) {
   )
 }
 
+// Live safety invariants (gateway safety.go). Each rule is checked every second
+// against what the clusters actually hold. Green means it has held at every
+// check since the gateway started; red stays red and shows what broke it.
+function Safety({ pic }) {
+  const s = pic?.safety
+  if (!s) return null
+  const secs = Math.max(0, Math.floor((pic.time - s.since_ms) / 1000))
+  const age = secs < 120 ? `${secs} s` : `${Math.floor(secs / 60)} min`
+  return (
+    <div className="safety">
+      <h2>
+        safety invariants{' '}
+        {s.ok ? <span className="ready">ALL HOLD</span> : <span className="notready">VIOLATED</span>}
+      </h2>
+      <div className="hint">checked every second for {age}</div>
+      <table><tbody>
+        {s.invariants.map((i) => (
+          <tr key={i.id} className={i.ok ? 'inv-ok' : 'inv-bad'} title={i.rule}>
+            <td className="inv-mark">{i.ok ? '\u2713' : '\u2717'}</td>
+            <td>
+              {i.name}
+              <div className="hint">{i.ok ? i.detail : i.last_violation}</div>
+            </td>
+            <td className="inv-count">{i.checks} checks{i.violations > 0 ? ` · ${i.violations} broken` : ''}</td>
+          </tr>
+        ))}
+      </tbody></table>
+      {s.recent?.length > 0 && <table><tbody>
+        {s.recent.slice(0, 5).map((v) => (
+          <tr key={`${v.ms}-${v.id}-${v.msg}`} className="rejected">
+            <td>{new Date(v.ms).toLocaleTimeString()}</td><td>{v.msg}</td>
+          </tr>
+        ))}
+      </tbody></table>}
+    </div>
+  )
+}
+
 function Clusters({ pic }) {
   const names = Object.keys(pic?.clusters ?? {}).sort()
   return names.map((c) => (
@@ -417,7 +455,7 @@ export default function App() {
         <Clearances pic={pic} />
         <Handoffs pic={pic} />
         <Elastic pic={pic} session={session} />
-        {/* TODO: live safety-invariant panel goes here */}
+        <Safety pic={pic} />
         <Clusters pic={pic} />
       </div>
     </div>
