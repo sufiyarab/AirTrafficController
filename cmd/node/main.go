@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"atc/internal/fsm"
+	"atc/internal/mtls"
 
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
@@ -38,6 +39,7 @@ func main() {
 	raftBind := env("RAFT_BIND", ":7000")
 	raftAdvertise := env("RAFT_ADVERTISE", id+":7000")
 	httpAddr := env("HTTP_ADDR", ":8080")
+	grpcAddr := env("GRPC_ADDR", ":9090")
 	dataDir := env("DATA_DIR", "/data")
 	peers := env("PEERS", id+"="+raftAdvertise) // "a=a:7000,b=b:7000,c=c:7000"
 
@@ -92,14 +94,27 @@ func main() {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	mux.HandleFunc("GET /status", s.status)
 	mux.HandleFunc("GET /state", s.state)
-	mux.HandleFunc("POST /apply", s.apply)
+	mux.HandleFunc("POST /apply", httpWrite(s.apply))
 	mux.HandleFunc("GET /owners", s.owners)
 	mux.HandleFunc("GET /sectors", s.sectors)
-	mux.HandleFunc("POST /track", s.track)
+	mux.HandleFunc("POST /track", httpWrite(s.track))
 	mux.HandleFunc("GET /tracks", s.tracksHandler)
 	mux.HandleFunc("GET /metrics", s.metrics)
-	log.Printf("node %s (cluster %s) raft=%s http=%s", id, cluster, raftAdvertise, httpAddr)
+	go serveGRPC(s, grpcAddr)
+	log.Printf("node %s (cluster %s) raft=%s http=%s grpc=%s", id, cluster, raftAdvertise, httpAddr, grpcAddr)
 	log.Fatal(http.ListenAndServe(httpAddr, mux))
+}
+
+// httpWrite guards an HTTP endpoint that changes state. With mTLS on, writes
+// must come over gRPC with the gateway's certificate, so the unauthenticated
+// HTTP path is closed. Reads (/status, /state, /metrics, ...) stay open.
+func httpWrite(h http.HandlerFunc) http.HandlerFunc {
+	if !mtls.Enabled() {
+		return h
+	}
+	return func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "writes need gRPC with mutual TLS (MTLS=on)"})
+	}
 }
 
 // resolve retries because Docker's DNS entry can lag container start.
@@ -144,12 +159,16 @@ type status struct {
 }
 
 func (s *server) status(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.currentStatus())
+}
+
+func (s *server) currentStatus() status {
 	st := s.raft.Stats()
 	_, leader := s.raft.LeaderWithID()
-	writeJSON(w, http.StatusOK, status{
+	return status{
 		ID: s.id, Cluster: s.cluster, State: s.raft.State().String(), LeaderID: string(leader),
 		Term: st["term"], CommitIndex: st["commit_index"], AppliedIdx: st["applied_index"], LastContact: st["last_contact"],
-	})
+	}
 }
 
 func (s *server) state(w http.ResponseWriter, _ *http.Request) {
@@ -177,6 +196,13 @@ func (s *server) track(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	s.deliver(batch)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// deliver applies the FIFO rule to one batch of JSON reports. Shared by the
+// HTTP and gRPC Track handlers.
+func (s *server) deliver(batch []json.RawMessage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, raw := range batch {
@@ -194,7 +220,6 @@ func (s *server) track(w http.ResponseWriter, req *http.Request) {
 		s.tracks[hdr.Callsign] = track{Seq: hdr.Seq, Report: raw}
 		s.delivered++
 	}
-	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *server) tracksHandler(w http.ResponseWriter, _ *http.Request) {
@@ -206,27 +231,53 @@ func (s *server) tracksHandler(w http.ResponseWriter, _ *http.Request) {
 // apply appends a command to the log. Only the leader accepts writes; a
 // follower answers 421 with the leader's ID so the caller can retry there.
 func (s *server) apply(w http.ResponseWriter, req *http.Request) {
+	var c fsm.Command
+	if s.raft.State() == raft.Leader {
+		if err := json.NewDecoder(req.Body).Decode(&c); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	r := s.commit(c)
+	switch {
+	case r.notLeader:
+		writeJSON(w, http.StatusMisdirectedRequest, map[string]string{"error": "not leader", "leader_id": r.leaderID})
+	case r.err != nil:
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": r.err.Error()})
+	case r.rejected != nil:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": r.rejected.Error()})
+	default:
+		writeJSON(w, http.StatusOK, map[string]any{"index": r.index, "result": r.result})
+	}
+}
+
+// commitResult is the outcome of one Apply, whichever transport carried it.
+type commitResult struct {
+	notLeader bool
+	leaderID  string
+	err       error // not committed: Raft failed or timed out
+	rejected  error // committed, but the state machine refused it
+	index     uint64
+	result    any
+}
+
+// commit appends c to the Raft log and waits for it to be applied. Only the
+// leader accepts writes; a follower reports the leader's ID so the caller
+// can retry there.
+func (s *server) commit(c fsm.Command) commitResult {
 	if s.raft.State() != raft.Leader {
 		_, leader := s.raft.LeaderWithID()
-		writeJSON(w, http.StatusMisdirectedRequest, map[string]string{"error": "not leader", "leader_id": string(leader)})
-		return
-	}
-	var c fsm.Command
-	if err := json.NewDecoder(req.Body).Decode(&c); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
+		return commitResult{notLeader: true, leaderID: string(leader)}
 	}
 	b, _ := json.Marshal(c)
 	f := s.raft.Apply(b, 2*time.Second)
 	if err := f.Error(); err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
-		return
+		return commitResult{err: err}
 	}
 	if err, ok := f.Response().(error); ok && err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
+		return commitResult{rejected: err, index: f.Index()}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"index": f.Index(), "result": f.Response()})
+	return commitResult{index: f.Index(), result: f.Response()}
 }
 
 // metrics is a minimal Prometheus text exposition, enough for Grafana

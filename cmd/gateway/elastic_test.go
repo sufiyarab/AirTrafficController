@@ -404,7 +404,7 @@ func newElasticGateway(cfg elasticConfig) (*gateway, *realRegistry) {
 		inflight: map[string]bool{}, ready: map[string]readiness{},
 		el: newElastic(cfg),
 	}
-	g.client = &http.Client{Transport: routeTransport{map[string]http.Handler{"registry-a": reg.handler()}}, Timeout: time.Second}
+	g.rpc = &httpNodes{client: &http.Client{Transport: routeTransport{map[string]http.Handler{"registry-a": reg.handler()}}, Timeout: time.Second}}
 	g.updateReadiness(time.Now())
 	return g, reg
 }

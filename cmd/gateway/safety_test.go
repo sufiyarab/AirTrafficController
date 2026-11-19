@@ -141,7 +141,7 @@ func newSafetyHarness(t *testing.T) *safetyHarness {
 			inner.ServeHTTP(w, r)
 		})
 	}
-	sh.g.client = &http.Client{Transport: routeTransport{nodes}, Timeout: time.Second}
+	sh.g.rpc = &httpNodes{client: &http.Client{Transport: routeTransport{nodes}, Timeout: time.Second}}
 	return sh
 }
 

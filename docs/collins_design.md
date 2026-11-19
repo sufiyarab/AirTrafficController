@@ -7,10 +7,13 @@ authentication and authorization, mutual TLS, ground receivers and the
 This document describes how each piece fits into the code that already exists
 (Sufiya's scaffold, commit `d3ae8e9`) and what changes in which file. Read `docs/how-it-works.md` first; this builds on it.
 
-**Status (Nov 12):** sections 3 (Ready flag and buffer), 4 (clearances),
-5 (login) and 6 (receivers and ghost detection) are implemented. Not done
-from section 5: the WebSocket auth message and the X-Service-Key header
-(mTLS in section 7 replaces the latter). Section 7 is next.
+**Status (Nov 19): complete.** Sections 3 (Ready flag and buffer),
+4 (clearances), 5 (login), 6 (receivers and ghost detection) and 7 (gRPC and
+mutual TLS on every internal link; `TRANSPORT=http MTLS=off` keeps the old
+path for comparison) are implemented. Decided against, with reasons in
+section 5: the X-Service-Key header (mTLS replaces it), the WebSocket auth
+message, and authorization of a parent sector's controller for the standby
+half after a split.
 
 ---
 
@@ -209,6 +212,15 @@ halves. The cleanest way is for the registry's sector map to record each
 sector's parent, and for the authorization check to accept the parent's
 controller. Agree the field name with Issaq.
 
+**Decision (Nov 19): not built; stated as a limitation.** The sector map
+records no parent, and adding one changes the replicated state machine
+shortly before the deadline. After a split, the half on the standby cluster
+can only receive clearances from the supervisor, who is authorized for every
+sector. Real centres do the same in spirit: a newly opened sector gets its own
+controller rather than inheriting the old one's authority. A `parent` field on
+`fsm.Sector` (set by `split`, cleared by `merge`) plus one check in
+`scope.allows` (`cmd/gateway/auth.go`) would close the gap.
+
 ### Tokens
 
 - `POST /api/login {username, password}` returns a JWT signed with HS256,
@@ -219,10 +231,14 @@ controller. Agree the field name with Issaq.
   `golang.org/x/crypto/bcrypt`.
 - HTTP requests send `Authorization: Bearer <token>`.
 - The WebSocket does not put the token in the URL (URLs end up in logs).
-  The radar connects without a token for read-only data; if the user is
-  logged in, the first message the dashboard sends is
-  `{"type":"auth","token":"..."}`, and the gateway then includes that
-  controller's pending-clearance list in the feed.
+  The radar connects without a token for read-only data.
+  **Decision (Nov 19): no WebSocket auth message.** The plan was for the
+  dashboard to send `{"type":"auth","token":"..."}` so the feed could add the
+  controller's own pending clearances. But the feed already shows every
+  clearance (pending, committed, expired) to every viewer, like a radar-room
+  display, so the message would add nothing. The radar is read-only; every
+  write is a separate HTTP request with a JWT (`/api/clearance`, the elastic
+  controls) or a gRPC call with a client certificate.
 - The dashboard keeps the token in React state only, not localStorage, so a
   page reload logs out. That is acceptable for a demo.
 - Failed logins and rejected clearances are counted and exposed in
@@ -230,10 +246,10 @@ controller. Agree the field name with Issaq.
 
 ### Service-to-gateway authentication
 
-The simulator and the receivers also talk to the gateway. Until they move to
-gRPC with mTLS (section 7), they send a per-service key in an
-`X-Service-Key` header, set from an environment variable in compose. The
-gateway rejects position batches and receiver observations without it.
+The simulator and the receivers also talk to the gateway. **Decision
+(Nov 19):** the interim `X-Service-Key` header was never built; they moved
+straight to gRPC with mutual TLS (section 7), which identifies each of them
+by its certificate.
 
 ---
 
@@ -358,27 +374,40 @@ endpoints one-to-one, so the gateway change is mechanical:
 service Node {
   rpc Status(Empty) returns (NodeStatus);
   rpc Apply(Command) returns (ApplyReply);          // same Command as fsm.Command
-  rpc Track(stream PositionBatch) returns (TrackAck);
+  rpc Track(PositionBatch) returns (Empty);          // unary, see below
   rpc Owners(Empty) returns (OwnerTable);
 }
 
 service Gateway {
-  rpc StreamPositions(stream PositionBatch) returns (Ack);        // simulator
-  rpc ReportObservations(stream ObservationBatch) returns (Ack);  // receivers
+  rpc ReportPositions(PositionBatch) returns (Empty);        // simulator
+  rpc ReportObservations(ObservationBatch) returns (Empty);  // receivers
 }
 ```
 
 `ApplyReply` carries `not_leader` and `leader_id`, replacing the HTTP 421.
+
+**Decision (Nov 19): `Track` is unary, one call per batch, not a stream.**
+FIFO delivery to a replica already comes from the gateway's single sender
+goroutine per replica (`sendLoop`), so a stream adds nothing to ordering, and
+a unary call needs no reconnect handling when a node is killed in the chaos
+demos. The same goes for the simulator's and receivers' calls to the
+gateway: one unary call per tick. `Sectors` and `State` return JSON inside the reply, because their schema
+belongs to the state machine and changes with it.
 The existing `Position`, `Ownership` and `Clearance` messages stay. Keep
 `Sector` and `Registry` from the draft out until someone needs them.
 
 ### Build changes
 
-- `deploy/go.Dockerfile`: add `protoc`, `protoc-gen-go`, `protoc-gen-go-grpc`
-  in the build stage and generate into `internal/atcpb/`. Alternatively commit
-  the generated Go files so the build stays simple; pick one and note it in the
-  README.
-- `sim/Dockerfile`: `grpcio`, `grpcio-tools`, generate Python stubs at build.
+- **Decision (Nov 19):** the generated Go files are committed in
+  `internal/atcpb/`, so the Dockerfile and CI need no `protoc`. The README
+  explains how to regenerate them.
+- `sim/Dockerfile`: `grpcio` and `protobuf`, pinned. **Decision (Nov 19):** the
+  Python stubs are committed in `sim/` like the Go ones. Both programs reach
+  the gateway through `sim/gateway_client.py`, which honours the same
+  `TRANSPORT` setting.
+- **Decision (Nov 19):** the simulator's per-tick broadcast to the receivers
+  stays HTTP. It models radio physics (what each station would hear), not a
+  link in the system, so it is outside the security boundary.
 - `go.mod`: `google.golang.org/grpc`, `google.golang.org/protobuf`.
 
 ### Migration without breaking anyone
@@ -422,23 +451,48 @@ the risk low.
   }
   ```
 - Authorization by identity, on nodes: `Apply` and `Track` accept only a
-  client certificate named `gateway`. `Status` and `Owners` accept any valid
-  certificate. On the gateway: `StreamPositions` accepts only `simulator`,
-  `ReportObservations` only `receiver-*`.
-- Once this is in, the `X-Service-Key` header from section 5 is removed.
+  client certificate named `gateway`. `Status`, `Owners`, `Sectors` and
+  `State` accept any valid certificate. On the gateway: `ReportPositions`
+  accepts only `simulator`, `ReportObservations` only `receiver-*`. An RPC
+  with no rule is refused, so a new RPC is closed until someone decides who
+  may call it (`internal/mtls`).
+
+**Decisions (Nov 19), as built:**
+
+- `MTLS=on|off`, default on. With it on, the HTTP write paths that would get
+  around it are refused with 403: node `/apply` and `/track`, gateway
+  `/api/positions`, `/api/position` and `/api/observations`. Reads stay open
+  (`/status`, `/metrics`, `/api/state`, the radar). `TRANSPORT=http` needs
+  `MTLS=off` and refuses to start otherwise; it exists only for the
+  transport comparison.
+- Certificates come from a one-shot `certs` service in compose that runs
+  `scripts/gen-certs.sh` before anything else starts (it keeps an existing
+  `./certs`), so `docker compose up` stays one command and CI is unchanged.
+- A receiver may only report under its own name: the certificate of
+  `receiver-a` cannot send `receiver-b`'s ranges. One compromised receiver
+  cannot outvote the others.
+- The gateway also checks each node's certificate (the TLS server name is the
+  node ID), so a container cannot pose as a node.
+- The simulator and receivers check that the gateway's certificate names
+  `gateway`.
 
 ### Demo
 
-Start a throwaway container on the `atc` network and try to commit an
-ownership change on the registry leader:
+`docker compose run --rm intruder` (`cmd/intruder`) is a throwaway container
+on the `atc` network that tries to write to the registry leader's Raft log
+four ways. Output with mTLS on (local run, Nov 19):
 
-- without a certificate: TLS handshake fails;
-- with a valid certificate named `receiver-a`: handshake succeeds, `Apply` is
-  refused (wrong identity);
-- the gateway's own calls keep working throughout.
+```
+1. HTTP POST /apply, no credentials              REFUSED   HTTP 403
+2. gRPC Apply, no certificate                    REFUSED   handshake fails
+3. gRPC Apply, forged "gateway" cert (own CA)    REFUSED   tls: certificate required
+4. gRPC Apply, real "receiver-a" certificate     REFUSED   PermissionDenied: receiver-a may not call /atc.Node/Apply
+   (its certificate is valid: reading Status is allowed)
+```
 
-Before mTLS, the same `curl` to `/apply` succeeds, which is a good
-before-and-after slide.
+With `MTLS=off`, attempts 1 and 2 both commit to the registry's log. The
+gateway's own calls keep working throughout. The same four cases run as a Go
+test (`cmd/node/mtls_test.go`).
 
 ---
 
@@ -482,5 +536,5 @@ changing its shape:
 |---|---|---|
 | Sufiya | Review of the gateway transport refactor and the clearance endpoint; agreement before any FSM change. | Clearances stored in sector Raft logs; gRPC/mTLS on her node code. |
 | Mashal | `spoof` scenario mode and the per-tick broadcast to receivers. | Receiver endpoint format; gRPC stubs for the simulator. |
-| Issaq | Sector map field for parent sector (for authorization after a split). | `g.ready` to gate splits into the standby cluster. |
+| Issaq | (Not needed after the Nov 19 decision in section 5.) Sector map field for parent sector. | `g.ready` to gate splits into the standby cluster. |
 | Chimdike | Layout agreement for the side panel. | Verification and clearance fields in the picture; the three invariants in section 4; failed-login and rejection counters for metrics. |

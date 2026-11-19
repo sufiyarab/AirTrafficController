@@ -12,7 +12,7 @@ emitter position to compute what it would physically measure: the range to
 the transmitter, plus Gaussian noise. It drops anything outside its coverage
 and posts the ranges to the gateway:
 
-    POST /api/observations
+    ReportObservations over gRPC (or POST /api/observations with TRANSPORT=http)
     {"receiver_id": "receiver-a",
      "observations": [{"callsign": "ATC001", "seq": 42, "range_nm": 104.9}, ...]}
 
@@ -24,7 +24,7 @@ can tell a receiver that hears nothing from one that is down.
 
 Environment: RECEIVER_ID, RECEIVER_X, RECEIVER_Y (NM), RECEIVER_RANGE_NM
 (coverage radius, default 200), RECEIVER_NOISE_NM (sigma, default 0.5),
-RECEIVER_PORT (default 9000), GATEWAY.
+RECEIVER_PORT (default 9000); TRANSPORT, GATEWAY_GRPC, GATEWAY (see gateway_client.py).
 """
 import json
 import math
@@ -37,13 +37,14 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from gateway_client import GatewayClient
+
 RID = os.environ.get("RECEIVER_ID", "rx")
 X = float(os.environ.get("RECEIVER_X", "0"))
 Y = float(os.environ.get("RECEIVER_Y", "0"))
 RANGE = float(os.environ.get("RECEIVER_RANGE_NM", "200"))
 NOISE = float(os.environ.get("RECEIVER_NOISE_NM", "0.5"))
 PORT = int(os.environ.get("RECEIVER_PORT", "9000"))
-GATEWAY = os.environ.get("GATEWAY", "http://gateway:8080")
 HEARTBEAT = 1.0  # seconds
 
 rng = random.Random(os.environ.get("SEED"))
@@ -65,12 +66,11 @@ def measure(broadcast):
     return out
 
 
+gateway = GatewayClient(RID)
+
+
 def post(observations):
-    body = json.dumps({"receiver_id": RID, "observations": observations}).encode()
-    req = urllib.request.Request(
-        GATEWAY + "/api/observations", data=body, headers={"Content-Type": "application/json"}
-    )
-    urllib.request.urlopen(req, timeout=2).read()
+    gateway.observations(RID, observations)
 
 
 def sender():
@@ -121,5 +121,5 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     threading.Thread(target=sender, daemon=True).start()
-    print(f"receiver {RID} at ({X}, {Y}) NM, range {RANGE} NM, noise {NOISE} NM, port {PORT}", flush=True)
+    print(f"receiver {RID} at ({X}, {Y}) NM, range {RANGE} NM, noise {NOISE} NM, port {PORT} -> {gateway.describe()}", flush=True)
     ThreadingHTTPServer(("", PORT), Handler).serve_forever()

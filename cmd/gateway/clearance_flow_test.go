@@ -87,7 +87,7 @@ func newHarness(t *testing.T) *harness {
 		h.g.clusters[name] = []string{id}
 		h.g.nodes[id] = nodeStatus{Up: true, State: "Leader"}
 	}
-	h.g.client = &http.Client{Transport: routeTransport{nodes}, Timeout: time.Second}
+	h.g.rpc = &httpNodes{client: &http.Client{Transport: routeTransport{nodes}, Timeout: time.Second}}
 	h.g.updateReadiness(time.Now())
 	return h
 }
