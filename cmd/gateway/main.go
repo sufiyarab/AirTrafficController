@@ -111,25 +111,28 @@ type gateway struct {
 	st        stats
 	safety    *safetyMonitor       // live safety-invariant checks, nil in tests (safety.go)
 	firstSeen map[string]time.Time // callsign -> when the gateway first saw it (safety.go)
+	conflicts *conflictState       // conflict detection, nil in tests (conflict.go)
+	flyables  map[string][]flyable // callsign -> recent committed clearances, sent to the simulator (conflict_follow.go)
 }
 
 func main() {
 	g := &gateway{
-		clusters: parseClusters(os.Getenv("CLUSTERS")),
-		el:       newElastic(loadElasticConfig()),
-		rpc:      nodeClientFromEnv(time.Second),
-		jobs:     make(chan job, 1024),
-		senders:  map[string]chan []position{},
-		nodes:    map[string]nodeStatus{},
-		aircraft: map[string]position{},
-		outbox:   map[string]map[string]position{},
-		owners:   map[string]fsm.Owner{},
-		seen:     map[string]time.Time{},
-		inflight: map[string]bool{},
-		ready:    map[string]readiness{},
-		ver:      verifierFromEnv(),
-		auth:     authFromEnv(),
-		safety:   newSafetyMonitor(time.Now()),
+		clusters:  parseClusters(os.Getenv("CLUSTERS")),
+		el:        newElastic(loadElasticConfig()),
+		rpc:       nodeClientFromEnv(time.Second),
+		jobs:      make(chan job, 1024),
+		senders:   map[string]chan []position{},
+		nodes:     map[string]nodeStatus{},
+		aircraft:  map[string]position{},
+		outbox:    map[string]map[string]position{},
+		owners:    map[string]fsm.Owner{},
+		seen:      map[string]time.Time{},
+		inflight:  map[string]bool{},
+		ready:     map[string]readiness{},
+		ver:       verifierFromEnv(),
+		auth:      authFromEnv(),
+		safety:    newSafetyMonitor(time.Now()),
+		conflicts: newConflictState(loadConflictConfig()),
 	}
 	g.geo.Store(fallbackGeo) // until the registry's map is read
 	for c, ids := range g.clusters {
@@ -150,6 +153,7 @@ func main() {
 	}
 	go g.elasticLoop()
 	go g.safetyLoop()
+	go g.conflictLoop()
 	for range 4 {
 		go g.worker()
 	}
@@ -238,12 +242,15 @@ func (g *gateway) positions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad position batch", http.StatusBadRequest)
 		return
 	}
+	var seen []string
 	for _, p := range ps {
 		if p.Callsign != "" {
 			g.accept(p)
+			seen = append(seen, p.Callsign)
 		}
 	}
-	w.WriteHeader(http.StatusAccepted)
+	// Same reply as gRPC ReportPositions: committed clearances to fly.
+	writeJSONStatus(w, http.StatusAccepted, map[string]any{"instructions": g.instructionsFor(seen)})
 }
 
 // accept records a report, queues it for the controlling sector, and starts
@@ -522,6 +529,8 @@ type picture struct {
 	AuthOn   bool          `json:"auth"`     // whether clearances need a login
 
 	Safety *safetyPicture `json:"safety,omitempty"` // live safety-invariant panel (safety.go)
+
+	Conflicts *conflictPicture `json:"conflicts,omitempty"` // predicted losses of separation (conflict.go)
 }
 
 func (g *gateway) snapshot() picture {
@@ -542,6 +551,7 @@ func (g *gateway) snapshot() picture {
 		sp := g.safety.picture()
 		pic.Safety = &sp
 	}
+	pic.Conflicts = g.conflictPictureLocked()
 	if g.ver != nil {
 		st := g.ver.st
 		pic.Verify = &st

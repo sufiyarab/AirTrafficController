@@ -144,6 +144,8 @@ services:
       RECEIVERS: "receiver-a=20,20;receiver-b=180,40;receiver-c=100,190"
       RECEIVER_RANGE_NM: "200"
       VERIFY_THRESHOLD_NM: "3"
+      # Conflict detection look-ahead in seconds (cmd/gateway/conflict.go).
+      CONFLICT_LOOKAHEAD_S: "${CONFLICT_LOOKAHEAD_S:-120}"
       # Controller login (cmd/gateway/auth.go). Demo accounts only; an empty
       # JWT_SECRET means a random one per run (tokens die with the gateway).
       USERS_FILE: /etc/atc/users.json
@@ -172,6 +174,7 @@ services:
       TICK: "1.0"
       SCENARIO: "${SCENARIO:-}"   # e.g. SCENARIO=scenarios/spoof_traffic.json docker compose up
       SPOOF: "${SPOOF:-0}"        # ghost aircraft added to the random fleet
+      FOLLOW_CLEARANCES: "${FOLLOW_CLEARANCES:-1}"   # 0: aircraft ignore committed clearances
       SPOOF_X: "100"              # where the spoofer's transmitter is, NM
       SPOOF_Y: "20"
       RECEIVERS: "http://receiver-a:9000,http://receiver-b:9000,http://receiver-c:9000"

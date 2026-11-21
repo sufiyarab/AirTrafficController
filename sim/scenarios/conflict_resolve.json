@@ -1,0 +1,11 @@
+{
+  "name": "Predicted conflicts to resolve",
+  "aircraft": [
+    {"callsign": "CONV001", "x": 40,  "y": 150, "alt": 30000, "heading": 90,  "speed": 360},
+    {"callsign": "CONV002", "x": 70,  "y": 150, "alt": 30000, "heading": 270, "speed": 360},
+    {"callsign": "CROSS01", "x": 130, "y": 60,  "alt": 25000, "heading": 0,   "speed": 400},
+    {"callsign": "CROSS02", "x": 160, "y": 90,  "alt": 25000, "heading": 270, "speed": 400},
+    {"callsign": "LEVEL01", "x": 60,  "y": 40,  "alt": 32000, "heading": 45,  "speed": 420},
+    {"callsign": "LEVEL02", "x": 170, "y": 170, "alt": 18000, "heading": 225, "speed": 300}
+  ]
+}

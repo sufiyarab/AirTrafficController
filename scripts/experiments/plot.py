@@ -111,10 +111,78 @@ def plot_scaling(d, summary):
         ax.set_title(title)
         ax.set_ylim(0, max(y for y in ys if y is not None) * 1.2)
     save(fig, "scaling.png")
+    if all(r.get("conflict_pairs_checked_avg") is not None for r in runs):
+        fig, ax = plt.subplots(figsize=(4.5, 2.8))
+        grid = [r["conflict_pairs_checked_avg"] for r in runs]
+        allp = [r["conflict_all_pairs_avg"] for r in runs]
+        ax.plot(n, allp, color=SERIES[1], marker="o", markersize=5, label="all pairs, n(n-1)/2")
+        ax.plot(n, grid, color=SERIES[0], marker="o", markersize=5, label="pairs the grid checks")
+        for x, y in zip(n, grid):
+            ax.annotate(f"{y:.0f}", (x, y), textcoords="offset points", xytext=(0, 6), ha="center", fontsize=8, color=INK2)
+        ax.set_xticks(n)
+        ax.set_xlabel("aircraft")
+        ax.set_title("Conflict detection: pairs checked per second")
+        ax.legend(fontsize=8)
+        save(fig, "conflict_grid.png")
     summary["scaling"] = [{k: (round(r[k], 1) if isinstance(r[k], float) else r[k])
                            for k in ("aircraft", "handoffs_per_min", "mean_handoff_ms", "multicast_per_s",
-                                     "aborted", "gateway_cpu_avg", "leader_cpu_avg")} |
+                                     "aborted", "gateway_cpu_avg", "leader_cpu_avg")
+                           if k in r} |
+                          {k: round(r[k], 3) for k in ("conflict_pairs_checked_avg", "conflict_all_pairs_avg",
+                                                       "conflict_ms_avg") if r.get(k) is not None} |
                           {"safety_ok": (r.get("safety") or {}).get("ok")} for r in runs]
+
+
+# ---------- conflict ----------
+
+def plot_conflict(d, summary):
+    """One row per watched pair: horizontal and vertical distance over time,
+    with the conflict left alone vs resolved with the suggested clearance."""
+    runs = {("resolved" if r["resolve"] else "ignored"): r for r in sorted(d["runs"], key=lambda r: r["resolve"])}
+    keys = ["CONV001|CONV002", "CROSS01|CROSS02"]
+    names = {"CONV001|CONV002": "Head-on pair", "CROSS01|CROSS02": "Crossing pair"}
+    style = {"ignored": (SERIES[1], "left alone"), "resolved": (SERIES[0], "suggested clearance issued")}
+    fig, axes = plt.subplots(2, 2, figsize=(9, 5.2), sharex=True)
+    for row, key in enumerate(keys):
+        for label, r in runs.items():
+            color, text = style[label]
+            pts = [(t["t"], t[key]["h_nm"], t[key]["v_ft"]) for t in r["track"] if t.get(key, {}).get("h_nm") is not None]
+            if not pts:
+                continue
+            ts, hs, vs = zip(*pts)
+            width = 3.5 if label == "ignored" else 1.8  # the wider line stays visible under the other
+            axes[row][0].plot(ts, hs, color=color, label=text, linewidth=width)
+            axes[row][1].plot(ts, vs, color=color, label=text, linewidth=width)
+            p = r["pairs"].get(key)
+            if p:
+                for ax in axes[row]:
+                    ax.axvline(p["first_t"], color=INK2, linewidth=1, linestyle=":")
+                if p.get("issued"):
+                    for ax in axes[row]:
+                        ax.axvline(p["issued"]["t"], color=color, linewidth=1, linestyle="--")
+        axes[row][0].axhline(5, color=STATUS["critical"], linewidth=1, linestyle="--")
+        axes[row][1].axhline(1000, color=STATUS["critical"], linewidth=1, linestyle="--")
+        axes[row][0].set_title(f"{names[key]}: horizontal distance (NM)")
+        axes[row][1].set_title(f"{names[key]}: vertical separation (ft)")
+        axes[row][0].set_ylim(bottom=0)
+        axes[row][1].set_ylim(bottom=0)
+    for ax in axes[1]:
+        ax.set_xlabel("seconds since the simulator started")
+    axes[0][1].legend(loc="upper left", fontsize=8)
+    fig.text(0.01, -0.02, "Red dashed: separation minimum (5 NM, 1,000 ft). Dotted: conflict alerted. "
+             "Dashed: suggested clearance issued.\nThe resolutions are climbs, so the horizontal tracks "
+             "are the same in both runs. A loss needs both distances under the minimum at once.",
+             fontsize=8, color=INK2)
+    fig.tight_layout()
+    save(fig, "conflict.png")
+    out = {"react_s": d.get("react_s")}
+    for label, r in runs.items():
+        out[label] = {k: {"alerted_t": round(p["first_t"], 1), "warning_s": round(p["first_in_s"], 1),
+                          "loss": p["loss"], "issued": (p.get("issued") or {}).get("instruction")}
+                      for k, p in r["pairs"].items()}
+        out[label]["stats"] = r.get("stats")
+        out[label]["safety_ok"] = (r.get("safety") or {}).get("ok")
+    summary["conflict"] = out
 
 
 # ---------- transport ----------
@@ -271,7 +339,8 @@ def main():
     args = p.parse_args()
     summary = {}
     for name, fn in (("failover", plot_failover), ("scaling", plot_scaling), ("surge", plot_surge),
-                     ("ghost", plot_ghost), ("chaos", plot_chaos), ("transport", plot_transport)):
+                     ("ghost", plot_ghost), ("chaos", plot_chaos), ("transport", plot_transport),
+                     ("conflict", plot_conflict)):
         d, src = newest(name)
         if d is None:
             print(f"no results/{name}-*.json yet, skipping")

@@ -327,7 +327,7 @@ class GatewayStub:
         self.ReportPositions = channel.unary_unary(
                 '/atc.Gateway/ReportPositions',
                 request_serializer=atc__pb2.PositionBatch.SerializeToString,
-                response_deserializer=atc__pb2.Empty.FromString,
+                response_deserializer=atc__pb2.Instructions.FromString,
                 _registered_method=True)
         self.ReportObservations = channel.unary_unary(
                 '/atc.Gateway/ReportObservations',
@@ -341,7 +341,7 @@ class GatewayServicer:
     """
 
     def ReportPositions(self, request, context):
-        """simulator: claimed positions (callsign .. speed_kt)
+        """simulator: claimed positions (callsign .. speed_kt); reply: committed clearances to fly
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -360,7 +360,7 @@ def add_GatewayServicer_to_server(servicer, server):
             'ReportPositions': grpc.unary_unary_rpc_method_handler(
                     servicer.ReportPositions,
                     request_deserializer=atc__pb2.PositionBatch.FromString,
-                    response_serializer=atc__pb2.Empty.SerializeToString,
+                    response_serializer=atc__pb2.Instructions.SerializeToString,
             ),
             'ReportObservations': grpc.unary_unary_rpc_method_handler(
                     servicer.ReportObservations,
@@ -395,7 +395,7 @@ class Gateway:
             target,
             '/atc.Gateway/ReportPositions',
             atc__pb2.PositionBatch.SerializeToString,
-            atc__pb2.Empty.FromString,
+            atc__pb2.Instructions.FromString,
             options,
             channel_credentials,
             insecure,

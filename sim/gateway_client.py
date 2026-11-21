@@ -69,9 +69,14 @@ class GatewayClient:
         return f"gRPC {GATEWAY_GRPC}" + (" with mutual TLS" if self.mtls else "")
 
     def positions(self, claims, timeout=2):
-        """Send one tick of claimed positions: dicts with callsign, seq, x, y, alt, heading, speed."""
+        """Send one tick of claimed positions: dicts with callsign, seq, x, y, alt, heading, speed.
+
+        Returns the gateway's reply: recent committed clearances of the
+        aircraft in the batch, oldest first, as dicts with callsign,
+        clearance_id and instruction (see apply_instructions in sim.py)."""
         if not self.stub:
-            return self._post("/api/positions", claims, timeout)
+            reply = self._post("/api/positions", claims, timeout)
+            return (reply or {}).get("instructions") or []
         batch = self.pb.PositionBatch(positions=[
             self.pb.Position(
                 callsign=c["callsign"], seq=int(c.get("seq", 0)), x_nm=c["x"], y_nm=c["y"],
@@ -79,7 +84,9 @@ class GatewayClient:
             )
             for c in claims
         ])
-        self._call(self.stub.ReportPositions, batch, timeout)
+        reply = self._call(self.stub.ReportPositions, batch, timeout)
+        return [{"callsign": i.callsign, "clearance_id": i.clearance_id, "instruction": i.instruction}
+                for i in reply.instructions]
 
     def observations(self, receiver_id, observations, timeout=2):
         """Send one receiver's ranges for a tick; an empty list is a heartbeat."""
@@ -92,7 +99,7 @@ class GatewayClient:
 
     def _call(self, rpc, msg, timeout):
         try:
-            rpc(msg, timeout=timeout)
+            return rpc(msg, timeout=timeout)
         except self.grpc.RpcError as error:
             raise GatewayError(f"{error.code().name}: {error.details()}") from None
 
@@ -101,4 +108,8 @@ class GatewayClient:
         req = urllib.request.Request(
             GATEWAY + path, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}
         )
-        urllib.request.urlopen(req, timeout=timeout).read()
+        body = urllib.request.urlopen(req, timeout=timeout).read()
+        try:
+            return json.loads(body) if body else None
+        except ValueError:
+            return None

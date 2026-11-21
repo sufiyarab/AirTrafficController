@@ -97,8 +97,19 @@ message ObservationBatch {
   repeated Observation observations = 2;
 }
 
+// A recently committed clearance for an aircraft, so the simulator can fly
+// it. clearance_id lets the simulator apply each clearance once even though
+// the gateway repeats it in every reply (cmd/gateway/conflict_follow.go).
+message Instruction {
+  string callsign = 1;
+  string clearance_id = 2;
+  string instruction = 3;  // e.g. "CLIMB FL340", "HEADING 090", "REDUCE SPEED 250"
+}
+
+message Instructions { repeated Instruction instructions = 1; }
+
 // Inputs from outside the Raft system. Unary, one call per tick, like Track.
 service Gateway {
-  rpc ReportPositions(PositionBatch) returns (Empty);        // simulator: claimed positions (callsign .. speed_kt)
+  rpc ReportPositions(PositionBatch) returns (Instructions); // simulator: claimed positions (callsign .. speed_kt); reply: committed clearances to fly
   rpc ReportObservations(ObservationBatch) returns (Empty);  // ground receivers
 }
