@@ -11,7 +11,8 @@ Run from the repo root, with the images already built (docker compose build):
     python3 scripts/experiments/run.py ghost      # spoof detection time, receiver loss
     python3 scripts/experiments/run.py chaos      # safety invariants under mixed faults
     python3 scripts/experiments/run.py transport  # HTTP/JSON vs gRPC vs gRPC + mTLS
-    python3 scripts/experiments/run.py all        # all six, about 30 minutes
+    python3 scripts/experiments/run.py conflict   # converging pairs: alert lead time, resolution on/off
+    python3 scripts/experiments/run.py all        # all seven, about 37 minutes
 
 Only the Python standard library and the docker CLI are needed. Every
 experiment ends with `docker compose down -v`.
@@ -280,7 +281,10 @@ def scaling(args):
             mean = (h["avg_ms"] * h["handoffs"] - prev["avg_ms"] * prev["handoffs"]) / dn if dn > 0 else None
             lead = leader(s, "sector-1")
             cpu = docker_stats(["gateway"] + ([lead["id"]] if lead else []))
+            cst = (s.get("conflicts") or {}).get("stats") or {}
             samples.append({"t": time.time(), "handoffs": dn, "interval_mean_ms": mean,
+                            "conflict_pairs_checked": cst.get("pairs_checked"), "conflict_all_pairs": cst.get("all_pairs"),
+                            "conflict_ms": cst.get("last_ms"),
                             "multicast": h["multicast_batches"] - prev["multicast_batches"],
                             "dropped": h["multicast_dropped"] - prev["multicast_dropped"],
                             "aborted": h["aborted"] - prev["aborted"], "aircraft": len(s.get("aircraft") or []),
@@ -298,6 +302,9 @@ def scaling(args):
                "aborted": sum(x["aborted"] for x in samples),
                "gateway_cpu_avg": avg([x["gateway_cpu"] for x in samples]),
                "leader_cpu_avg": avg([x["leader_cpu"] for x in samples]),
+               "conflict_pairs_checked_avg": avg([x["conflict_pairs_checked"] for x in samples]),
+               "conflict_all_pairs_avg": avg([x["conflict_all_pairs"] for x in samples]),
+               "conflict_ms_avg": avg([x["conflict_ms"] for x in samples]),
                "safety": safety_summary()}
         log(f"{n} aircraft: {run['handoffs_per_min']:.0f} handoffs/min, mean {fmt(run['mean_handoff_ms'])} ms, "
             f"gateway CPU {fmt(run['gateway_cpu_avg'])}%")
@@ -540,18 +547,84 @@ def chaos(args):
     return save("chaos", out)
 
 
+# ---------- conflict detection and resolution ----------
+
+def pair_geometry(s, a, b):
+    """Horizontal (NM) and vertical (ft) distance between two aircraft now."""
+    pos = {x["callsign"]: x for x in s.get("aircraft") or []}
+    if a not in pos or b not in pos:
+        return None, None
+    pa, pb = pos[a], pos[b]
+    return ((pa["x"] - pb["x"]) ** 2 + (pa["y"] - pb["y"]) ** 2) ** 0.5, abs(pa["alt"] - pb["alt"])
+
+
+def conflict_run(resolve, args):
+    env = {"SCENARIO": "scenarios/conflict_resolve.json"}
+    up(env=env, sim_later=True)
+    token = login()
+    t0 = start_sim(env=env)
+    pairs, track, issued = {}, [], {}
+    watch = [("CONV001", "CONV002"), ("CROSS01", "CROSS02")]
+    while time.time() - t0 < args.seconds:
+        s = state()
+        if not s:
+            time.sleep(0.25)
+            continue
+        now = time.time() - t0
+        cf = s.get("conflicts") or {}
+        row = {"t": now, "active": len(cf.get("active") or [])}
+        for a, b in watch:
+            h, v = pair_geometry(s, a, b)
+            row[f"{a}|{b}"] = {"h_nm": h, "v_ft": v}
+        track.append(row)
+        for c in cf.get("active") or []:
+            p = pairs.setdefault(c["key"], {"first_t": now, "first_in_s": c["in_s"], "loss": False, "suggestion": c.get("suggestion")})
+            p["loss"] = p["loss"] or c["loss"]
+            p["last_t"] = now
+            if resolve and c["key"] not in issued and c.get("suggestion") and now - p["first_t"] >= args.react:
+                sg = c["suggestion"]
+                code, r = http("POST", "/api/clearance", {"callsign": sg["callsign"], "instruction": sg["instruction"]}, token)
+                issued[c["key"]] = {"t": now, "http": code, "status": (r or {}).get("status"), **sg}
+                log(f"t={now:.0f}s {c['key']}: issued {sg['callsign']} {sg['instruction']} -> {(r or {}).get('status')}")
+        time.sleep(0.25)
+    for key, p in pairs.items():
+        p["issued"] = issued.get(key)
+    out = {"resolve": resolve, "pairs": pairs, "track": track, "stats": (state().get("conflicts") or {}).get("stats"),
+           "safety": safety_summary()}
+    down()
+    return out
+
+
+def conflict(args):
+    """Conflict detection and resolution, on sim/scenarios/conflict_resolve.json
+    (a head-on pair 30 NM apart and a crossing pair, both at the same level).
+    Run twice: once leaving the conflicts alone, once issuing each suggested
+    resolution REACT seconds after the alert. Records how much warning each
+    conflict got, whether separation was lost, and the pairs' horizontal and
+    vertical distance over time."""
+    runs = []
+    for resolve in (False, True):
+        r = conflict_run(resolve, args)
+        for key, p in r["pairs"].items():
+            log(f"{'resolve' if resolve else 'ignore '} {key}: alerted at t={p['first_t']:.0f}s, "
+                f"{p['first_in_s']:.0f}s before the loss; loss={p['loss']}")
+        runs.append(r)
+    return save("conflict", {"react_s": args.react, "runs": runs})
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("experiment", choices=["failover", "scaling", "surge", "ghost", "chaos", "transport", "all"])
+    p.add_argument("experiment", choices=["failover", "scaling", "surge", "ghost", "chaos", "transport", "conflict", "all"])
     p.add_argument("--rounds", type=int, default=3, help="failover: crashes per cluster")
     p.add_argument("--sizes", type=int, nargs="+", default=[50, 100, 200, 400], help="scaling: fleet sizes")
     p.add_argument("--seconds", type=int, default=None, help="measuring time per run")
     p.add_argument("--warmup", type=int, default=15, help="scaling: seconds before measuring")
     p.add_argument("--ghosts", type=int, default=5, help="ghost: number of spoofed aircraft")
     p.add_argument("--aircraft", type=int, default=100, help="transport: fleet size")
+    p.add_argument("--react", type=int, default=10, help="conflict: seconds from the alert to issuing the suggested clearance")
     args = p.parse_args()
-    todo = ["failover", "scaling", "surge", "ghost", "chaos", "transport"] if args.experiment == "all" else [args.experiment]
-    defaults = {"scaling": 60, "surge": 150, "ghost": 40, "transport": 90}
+    todo = ["failover", "scaling", "surge", "ghost", "chaos", "transport", "conflict"] if args.experiment == "all" else [args.experiment]
+    defaults = {"scaling": 60, "surge": 150, "ghost": 40, "transport": 90, "conflict": 300}
     sec = args.seconds
     for name in todo:
         args.seconds = sec or defaults.get(name, 60)

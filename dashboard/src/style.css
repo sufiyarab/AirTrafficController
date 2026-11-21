@@ -46,3 +46,7 @@ td { padding: 2px 6px; border-bottom: 1px solid #1f3a2a; }
 .popover .close:hover { color: #fff; }
 .selected-line button { background: #12301f; color: #b8f5c8; border: 1px solid #1f5a3a; padding: 0 6px; font: inherit; font-size: 11px; cursor: pointer; }
 .status .toggle { margin-left: 10px; font-size: 12px; color: #5fa57a; cursor: pointer; }
+.conflicts button { background: #12301f; color: #b8f5c8; border: 1px solid #1f5a3a; padding: 1px 8px; font: inherit; font-size: 11px; cursor: pointer; }
+.conflicts button:disabled { opacity: 0.4; cursor: default; }
+.conflicts .conflict-loss td:first-child, .conflicts .conflict-loss td:nth-child(2) { color: #ff4d4d; font-weight: bold; }
+.conflicts .conflict-predicted td:first-child, .conflicts .conflict-predicted td:nth-child(2) { color: #ffb000; }

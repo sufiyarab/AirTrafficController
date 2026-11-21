@@ -86,7 +86,7 @@ range. Tunables: `VERIFY_THRESHOLD_NM` (gateway, default 3),
 
 ## Safety-invariant panel
 
-The "safety invariants" panel on the dashboard checks five rules every second
+The "safety invariants" panel on the dashboard checks six rules every second
 against what the clusters actually hold (`cmd/gateway/safety.go`):
 
 | Rule | What is checked |
@@ -96,6 +96,7 @@ against what the clusters actually hold (`cmd/gateway/safety.go`):
 | Clearances only from the owner | each clearance committed while its sector owned the aircraft (registry re-read after the commit), and every clearance record in a sector's log names that sector |
 | No clearance to a ghost | no clearance commits for an aircraft that was already SUSPECT |
 | No clearance lost | issued = committed + rejected + expired + pending, and every committed clearance is still in its sector's replicated state |
+| Every loss of separation is alerted | an all-pairs check finds every pair closer than 5 NM and 1,000 ft right now; each one must already be on the conflict list |
 
 Green means the rule held at every check since the gateway started; a broken
 rule stays red and shows what broke it. The same data is at
@@ -103,12 +104,54 @@ rule stays red and shows what broke it. The same data is at
 green. `go test ./cmd/gateway -run Safety` breaks each rule on purpose to show
 the checks catch it.
 
+## Conflict detection
+
+The gateway predicts losses of separation (closer than 5 NM horizontally and
+1,000 ft vertically at the same time) up to two minutes ahead
+(`cmd/gateway/conflict.go`, once a second):
+
+- Aircraft go into a grid of square cells as wide as 5 NM plus the distance
+  two aircraft can close in two minutes, so a pair that can meet in time is
+  always in the same or neighbouring cells. Only those pairs are checked, which
+  is about O(n) instead of all n(n-1)/2 pairs.
+- Each candidate pair is solved exactly: the time window when they are within
+  5 NM (a quadratic in time) and the window when they are within 1,000 ft
+  (from each aircraft's climb rate) must overlap inside the next 120 s.
+- Each conflict gets a suggested resolution: a climb or descent of 2,000 ft or
+  more for one of the two, checked against every other aircraft and kept
+  between FL050 and FL410.
+
+The radar draws a dashed amber line between a predicted pair (with the seconds
+to the loss) and a solid red line once separation is lost. The "conflicts" panel
+lists each one with a button that issues the suggested clearance through the
+normal clearance path (login and sector rules apply).
+
+The simulator now flies committed clearances: the reply to each position report
+(`ReportPositions` in `proto/atc.proto` now returns `Instructions`) carries the
+latest committed clearances for those aircraft, and the simulator climbs at
+2,000 ft/min, turns at 3 degrees/s and changes speed at 2 kt/s to meet them.
+To try it:
+
+```bash
+SCENARIO=scenarios/conflict_resolve.json docker compose up --build
+```
+
+A head-on pair is alerted within seconds and a crossing pair about two minutes
+before they meet. Log in as `supervisor` and press the suggestion button.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `CONFLICT_LOOKAHEAD_S` (gateway) | 120 | look-ahead in seconds |
+| `FOLLOW_CLEARANCES` (simulator) | 1 | 0 = aircraft ignore clearances, as before |
+
+Both can be set on the command line, e.g. `FOLLOW_CLEARANCES=0 docker compose up`.
+
 ## Experiments and graphs
 
 ```bash
 docker compose build
-python3 scripts/experiments/run.py all       # about 30 minutes; or one of:
-                                             # failover scaling surge ghost chaos transport
+python3 scripts/experiments/run.py all       # about 40 minutes; or one of:
+                                             # failover scaling surge ghost chaos transport conflict
 pip install matplotlib
 python3 scripts/experiments/plot.py --summary   # results/figures/*.png + summary.json
 ```
@@ -177,7 +220,8 @@ python -m grpc_tools.protoc -I proto --python_out=sim --grpc_python_out=sim prot
 
 ```
 cmd/node/          Raft replica (hashicorp/raft + raft-boltdb), HTTP: /status /state /apply /metrics, gRPC: service Node
-cmd/gateway/       gateway: leader tracking, position multicast, handoff coordinator, WebSocket feed
+cmd/gateway/       gateway: leader tracking, position multicast, handoff coordinator, WebSocket feed,
+                   safety invariants, conflict detection
 cmd/maekawa/       Maekawa baseline (grid voting sets, INQUIRE/FAILED/YIELD)
 cmd/intruder/      mTLS demo: a rogue container trying to write to the registry
 internal/fsm/      replicated state machine: ownership states + key/value
@@ -211,4 +255,5 @@ section 5).
 
 - Elastic split/merge using the standby cluster, sector map in the registry (Issaq)
 - Scenario files, conflict/stress modes, replay (Mashal)
+- Conflict detection with suggested resolutions; the simulator follows clearances
 - Grafana dashboards (Chimidike)

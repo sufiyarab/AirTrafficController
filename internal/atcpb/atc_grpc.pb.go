@@ -334,7 +334,7 @@ const (
 //
 // Inputs from outside the Raft system. Unary, one call per tick, like Track.
 type GatewayClient interface {
-	ReportPositions(ctx context.Context, in *PositionBatch, opts ...grpc.CallOption) (*Empty, error)
+	ReportPositions(ctx context.Context, in *PositionBatch, opts ...grpc.CallOption) (*Instructions, error)
 	ReportObservations(ctx context.Context, in *ObservationBatch, opts ...grpc.CallOption) (*Empty, error)
 }
 
@@ -346,9 +346,9 @@ func NewGatewayClient(cc grpc.ClientConnInterface) GatewayClient {
 	return &gatewayClient{cc}
 }
 
-func (c *gatewayClient) ReportPositions(ctx context.Context, in *PositionBatch, opts ...grpc.CallOption) (*Empty, error) {
+func (c *gatewayClient) ReportPositions(ctx context.Context, in *PositionBatch, opts ...grpc.CallOption) (*Instructions, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(Empty)
+	out := new(Instructions)
 	err := c.cc.Invoke(ctx, Gateway_ReportPositions_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -372,7 +372,7 @@ func (c *gatewayClient) ReportObservations(ctx context.Context, in *ObservationB
 //
 // Inputs from outside the Raft system. Unary, one call per tick, like Track.
 type GatewayServer interface {
-	ReportPositions(context.Context, *PositionBatch) (*Empty, error)
+	ReportPositions(context.Context, *PositionBatch) (*Instructions, error)
 	ReportObservations(context.Context, *ObservationBatch) (*Empty, error)
 	mustEmbedUnimplementedGatewayServer()
 }
@@ -384,7 +384,7 @@ type GatewayServer interface {
 // pointer dereference when methods are called.
 type UnimplementedGatewayServer struct{}
 
-func (UnimplementedGatewayServer) ReportPositions(context.Context, *PositionBatch) (*Empty, error) {
+func (UnimplementedGatewayServer) ReportPositions(context.Context, *PositionBatch) (*Instructions, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReportPositions not implemented")
 }
 func (UnimplementedGatewayServer) ReportObservations(context.Context, *ObservationBatch) (*Empty, error) {

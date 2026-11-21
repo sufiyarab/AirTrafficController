@@ -36,6 +36,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"sort"
 	"strings"
@@ -50,6 +51,7 @@ const (
 	InvClearanceOwner = "clearance_owner"
 	InvNoGhostClear   = "no_ghost_clear"
 	InvNoLostClear    = "no_lost_clear"
+	InvSepAlerted     = "separation_alerted"
 
 	safetyInterval  = time.Second
 	claimGrace      = 5 * time.Second // a new aircraft may be unowned this long
@@ -123,6 +125,8 @@ func newSafetyMonitor(now time.Time) *safetyMonitor {
 		"No clearance commits for an aircraft the ground receivers marked SUSPECT.")
 	add(InvNoLostClear, "No clearance lost",
 		"Every clearance ends committed, rejected or expired, and committed ones stay in the sector's log.")
+	add(InvSepAlerted, "Every loss of separation is alerted",
+		"Any two aircraft within 5 NM and 1,000 ft are on the conflict list (checked by brute force against the grid detector).")
 	return m
 }
 
@@ -448,6 +452,33 @@ func (g *gateway) safetyTick(now time.Time) {
 			lost[id] = fmt.Sprintf("committed clearance %s for %s is missing from %s's log", id, a.callsign, a.sector)
 		}
 	}
+	// Rule 6: an independent all-pairs check of the grid detector. Every pair
+	// that has lost separation right now must be on the detector's list.
+	if g.conflicts != nil {
+		var ms []mover
+		for cs, p := range g.aircraft {
+			if g.freshLocked(cs, now) && g.ver.state(cs) != VerSuspect {
+				ms = append(ms, moverFrom(p, 0))
+			}
+		}
+		missed, losses := map[string]string{}, 0
+		for i := range ms {
+			for j := i + 1; j < len(ms); j++ {
+				if !lostNow(ms[i], ms[j]) {
+					continue
+				}
+				losses++
+				a, b, key := pairKey(ms[i].cs, ms[j].cs)
+				if _, alerted := g.conflicts.active[key]; !alerted {
+					missed[key] = fmt.Sprintf("%s and %s are %.1f NM / %.0f ft apart with no conflict alert",
+						a, b, math.Hypot(ms[i].x-ms[j].x, ms[i].y-ms[j].y), math.Abs(ms[i].alt-ms[j].alt))
+				}
+			}
+		}
+		m.checked(InvSepAlerted, now, fmt.Sprintf("%d aircraft pairs compared, %d losses of separation now, %d conflicts alerted",
+			len(ms)*(len(ms)-1)/2, losses, len(g.conflicts.active)), m.persistent(InvSepAlerted, missed))
+	}
+
 	m.checked(InvNoLostClear, now,
 		fmt.Sprintf("%d issued, %d committed (%d found in the logs), %d pending", m.created, st.Committed, present, queued),
 		m.persistent(InvNoLostClear, lost))

@@ -85,10 +85,15 @@ function aircraftColor(ac) {
 // With many aircraft, a label on every one hides the picture. Label the ones a
 // controller is looking at or should look at; the rest show as a dot and a
 // leader line.
-function wantsLabel(ac, n, allLabels, selected, hovered) {
+function wantsLabel(ac, n, allLabels, selected, hovered, inConflict) {
   return allLabels || n <= LABEL_ALL_UP_TO || ac.callsign === selected || ac.callsign === hovered ||
-    ac.verify === 'SUSPECT' || ac.status === 'TRANSFERRING'
+    ac.verify === 'SUSPECT' || ac.status === 'TRANSFERRING' || inConflict.has(ac.callsign)
 }
+
+// Conflict colours: red once separation is lost, amber while only predicted.
+const LOSS_COLOR = '#ff4d4d'
+const PREDICTED_COLOR = '#ffb000'
+
 
 // Radar canvas, plus the clearance popover floating next to the selected
 // aircraft (children). The popover follows the aircraft on every update and
@@ -148,6 +153,28 @@ function Radar({ pic, selected, onSelect, coverage, allLabels, size, children })
       ctx.fillText(label, x + 8 + w > PX ? x - 8 - w : x + 8, y + 4) // keep labels on the canvas
     }
 
+    // Conflicts (gateway conflict.go): a line between the two aircraft, solid
+    // red when separation is already lost, dashed amber while predicted.
+    const conflicts = pic?.conflicts?.active ?? []
+    const inConflict = new Set(conflicts.flatMap((c) => [c.a, c.b]))
+    const pos = Object.fromEntries((pic?.aircraft ?? []).map((a) => [a.callsign, a]))
+    for (const c of conflicts) {
+      const a = pos[c.a], b = pos[c.b]
+      if (!a || !b) continue
+      const color = c.loss ? LOSS_COLOR : PREDICTED_COLOR
+      ctx.strokeStyle = color
+      ctx.lineWidth = 2
+      ctx.setLineDash(c.loss ? [] : [6, 4])
+      ctx.beginPath(); ctx.moveTo(a.x * s, toY(a.y)); ctx.lineTo(b.x * s, toY(b.y)); ctx.stroke()
+      ctx.setLineDash([])
+      for (const m of [a, b]) { ctx.beginPath(); ctx.arc(m.x * s, toY(m.y), 7, 0, 2 * Math.PI); ctx.stroke() }
+      ctx.lineWidth = 1
+      ctx.fillStyle = color
+      // below-left of the midpoint: callsign labels sit above-right of each aircraft
+      const tag = c.loss ? 'LOSS' : `${Math.round(c.in_s)}s`
+      ctx.fillText(tag, ((a.x + b.x) / 2) * s - 10 - ctx.measureText(tag).width, toY((a.y + b.y) / 2) + 18)
+    }
+
     const n = pic?.aircraft?.length ?? 0
     for (const ac of pic?.aircraft ?? []) {
       const x = ac.x * s, y = toY(ac.y)
@@ -158,7 +185,7 @@ function Radar({ pic, selected, onSelect, coverage, allLabels, size, children })
       ctx.strokeStyle = color
       ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + 10 * Math.sin(r), y - 10 * Math.cos(r)); ctx.stroke()
       ctx.fillStyle = ac.verify === 'SUSPECT' ? '#ff4d4d' : '#7fd69a'
-      if (wantsLabel(ac, n, allLabels, selected, hovered)) {
+      if (wantsLabel(ac, n, allLabels, selected, hovered, inConflict)) {
         ctx.fillText(`${ac.callsign}${ac.verify === 'SUSPECT' ? '?' : ''} ${Math.round(ac.alt / 100)}`, x + 5, y - 5)
       }
       if (ac.callsign === selected) { // ring around the aircraft being cleared
@@ -498,6 +525,69 @@ function Safety({ pic }) {
   )
 }
 
+// Conflicts (gateway conflict.go): pairs predicted to come within 5 NM and
+// 1,000 ft in the look-ahead window, soonest first, each with a suggested
+// climb or descent. The button issues it as an ordinary clearance, so login,
+// sector rights and the owner sector's Raft log all apply.
+function Conflicts({ pic, session, setSession, onSelect }) {
+  const [results, setResults] = useState({}) // conflict key -> clearance answer
+  const cf = pic?.conflicts
+  if (!cf) return null
+  const st = cf.stats
+  const byCS = Object.fromEntries((pic.aircraft ?? []).map((a) => [a.callsign, a]))
+  const issue = async (c) => {
+    const sg = c.suggestion
+    setResults((r) => ({ ...r, [c.key]: { status: 'sending' } }))
+    const headers = { 'Content-Type': 'application/json' }
+    if (session) headers.Authorization = `Bearer ${session.token}`
+    try {
+      const res = await fetch('/api/clearance', {
+        method: 'POST', headers,
+        body: JSON.stringify({ callsign: sg.callsign, instruction: sg.instruction, issued_by: 'conflict-advisory' }),
+      })
+      if (res.status === 401) setSession(null)
+      const body = await res.json()
+      setResults((r) => ({ ...r, [c.key]: body }))
+    } catch (err) {
+      setResults((r) => ({ ...r, [c.key]: { status: 'rejected', reason: `gateway unreachable: ${err.message}` } }))
+    }
+  }
+  return (
+    <div className="conflicts">
+      <h2>conflicts (5 NM / 1,000 ft, {st.lookahead_s}s look-ahead){' '}
+        {cf.active.length > 0 && <span className="notready">{cf.active.length} active</span>}
+      </h2>
+      <div className="hint">
+        grid checked {st.pairs_checked} of {st.all_pairs} pairs in {st.last_ms.toFixed(2)} ms · {st.detected} detected ·{' '}
+        {st.resolved} cleared before a loss · {st.losses} losses (avg warning {st.avg_warning_s.toFixed(0)}s)
+      </div>
+      {cf.active.length === 0 && <div className="hint">no conflicts predicted</div>}
+      <table><tbody>
+        {cf.active.map((c) => {
+          const sg = c.suggestion
+          const blocked = sg ? blockedReason(pic, byCS[sg.callsign], session) : null
+          const r = results[c.key]
+          return (
+            <tr key={c.key} className={c.loss ? 'conflict-loss' : 'conflict-predicted'}>
+              <td style={{ cursor: 'pointer' }} onClick={() => onSelect(c.a)}>{c.a} / {c.b}</td>
+              <td>{c.loss ? 'LOSS' : `in ${Math.round(c.in_s)}s`}</td>
+              <td>{c.min_nm.toFixed(1)} NM · {Math.round(c.vert_ft)} ft</td>
+              <td>
+                {sg
+                  ? <button onClick={() => issue(c)} disabled={!!blocked} title={blocked ?? `issued in ${sg.sector || 'its sector'}`}>
+                      {sg.callsign} {sg.instruction}
+                    </button>
+                  : <span className="hint">no safe level</span>}
+                {r && <div className={`hint ${r.status}`}>{r.status}{r.reason ? `: ${r.reason}` : ''}</div>}
+              </td>
+            </tr>
+          )
+        })}
+      </tbody></table>
+    </div>
+  )
+}
+
 function Clusters({ pic }) {
   const names = Object.keys(pic?.clusters ?? {}).sort()
   return names.map((c) => (
@@ -596,6 +686,7 @@ export default function App() {
         </div>
         <Login pic={pic} session={session} setSession={setSession} />
         <Selected pic={pic} selected={selected} onSelect={setSelected} />
+        <Conflicts pic={pic} session={session} setSession={setSession} onSelect={setSelected} />
         <Alerts pic={pic} coverage={coverage} setCoverage={setCoverage} onSelect={setSelected} />
         <Clearances pic={pic} />
         <Handoffs pic={pic} />

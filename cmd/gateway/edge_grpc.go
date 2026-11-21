@@ -71,7 +71,8 @@ func httpInput(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func (e *edgeServer) ReportPositions(_ context.Context, b *atcpb.PositionBatch) (*atcpb.Empty, error) {
+func (e *edgeServer) ReportPositions(_ context.Context, b *atcpb.PositionBatch) (*atcpb.Instructions, error) {
+	var seen []string
 	for _, p := range b.Positions {
 		if p.Callsign == "" {
 			continue
@@ -79,8 +80,10 @@ func (e *edgeServer) ReportPositions(_ context.Context, b *atcpb.PositionBatch) 
 		// Only what the aircraft claims; sector, owner, status and verify are
 		// the gateway's to decide.
 		e.g.accept(position{Callsign: p.Callsign, Seq: p.Seq, X: p.XNm, Y: p.YNm, Alt: p.AltFt, Heading: p.HeadingDeg, Speed: p.SpeedKt})
+		seen = append(seen, p.Callsign)
 	}
-	return &atcpb.Empty{}, nil
+	// The reply carries the committed clearances to fly (conflict_follow.go).
+	return instructionsPB(e.g.instructionsFor(seen)), nil
 }
 
 func (e *edgeServer) ReportObservations(ctx context.Context, b *atcpb.ObservationBatch) (*atcpb.Empty, error) {

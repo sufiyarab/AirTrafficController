@@ -751,6 +751,113 @@ func (x *ObservationBatch) GetObservations() []*Observation {
 	return nil
 }
 
+// A recently committed clearance for an aircraft, so the simulator can fly
+// it. clearance_id lets the simulator apply each clearance once even though
+// the gateway repeats it in every reply (cmd/gateway/conflict_follow.go).
+type Instruction struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Callsign      string                 `protobuf:"bytes,1,opt,name=callsign,proto3" json:"callsign,omitempty"`
+	ClearanceId   string                 `protobuf:"bytes,2,opt,name=clearance_id,json=clearanceId,proto3" json:"clearance_id,omitempty"`
+	Instruction   string                 `protobuf:"bytes,3,opt,name=instruction,proto3" json:"instruction,omitempty"` // e.g. "CLIMB FL340", "HEADING 090", "REDUCE SPEED 250"
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Instruction) Reset() {
+	*x = Instruction{}
+	mi := &file_atc_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Instruction) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Instruction) ProtoMessage() {}
+
+func (x *Instruction) ProtoReflect() protoreflect.Message {
+	mi := &file_atc_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Instruction.ProtoReflect.Descriptor instead.
+func (*Instruction) Descriptor() ([]byte, []int) {
+	return file_atc_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *Instruction) GetCallsign() string {
+	if x != nil {
+		return x.Callsign
+	}
+	return ""
+}
+
+func (x *Instruction) GetClearanceId() string {
+	if x != nil {
+		return x.ClearanceId
+	}
+	return ""
+}
+
+func (x *Instruction) GetInstruction() string {
+	if x != nil {
+		return x.Instruction
+	}
+	return ""
+}
+
+type Instructions struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Instructions  []*Instruction         `protobuf:"bytes,1,rep,name=instructions,proto3" json:"instructions,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Instructions) Reset() {
+	*x = Instructions{}
+	mi := &file_atc_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Instructions) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Instructions) ProtoMessage() {}
+
+func (x *Instructions) ProtoReflect() protoreflect.Message {
+	mi := &file_atc_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Instructions.ProtoReflect.Descriptor instead.
+func (*Instructions) Descriptor() ([]byte, []int) {
+	return file_atc_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *Instructions) GetInstructions() []*Instruction {
+	if x != nil {
+		return x.Instructions
+	}
+	return nil
+}
+
 var File_atc_proto protoreflect.FileDescriptor
 
 const file_atc_proto_rawDesc = "" +
@@ -817,7 +924,13 @@ const file_atc_proto_rawDesc = "" +
 	"\x10ObservationBatch\x12\x1f\n" +
 	"\vreceiver_id\x18\x01 \x01(\tR\n" +
 	"receiverId\x124\n" +
-	"\fobservations\x18\x02 \x03(\v2\x10.atc.ObservationR\fobservations2\xef\x01\n" +
+	"\fobservations\x18\x02 \x03(\v2\x10.atc.ObservationR\fobservations\"n\n" +
+	"\vInstruction\x12\x1a\n" +
+	"\bcallsign\x18\x01 \x01(\tR\bcallsign\x12!\n" +
+	"\fclearance_id\x18\x02 \x01(\tR\vclearanceId\x12 \n" +
+	"\vinstruction\x18\x03 \x01(\tR\vinstruction\"D\n" +
+	"\fInstructions\x124\n" +
+	"\finstructions\x18\x01 \x03(\v2\x10.atc.InstructionR\finstructions2\xef\x01\n" +
 	"\x04Node\x12%\n" +
 	"\x06Status\x12\n" +
 	".atc.Empty\x1a\x0f.atc.NodeStatus\x12&\n" +
@@ -829,10 +942,9 @@ const file_atc_proto_rawDesc = "" +
 	"\aSectors\x12\n" +
 	".atc.Empty\x1a\r.atc.JSONBlob\x12\"\n" +
 	"\x05State\x12\n" +
-	".atc.Empty\x1a\r.atc.JSONBlob2u\n" +
-	"\aGateway\x121\n" +
-	"\x0fReportPositions\x12\x12.atc.PositionBatch\x1a\n" +
-	".atc.Empty\x127\n" +
+	".atc.Empty\x1a\r.atc.JSONBlob2|\n" +
+	"\aGateway\x128\n" +
+	"\x0fReportPositions\x12\x12.atc.PositionBatch\x1a\x11.atc.Instructions\x127\n" +
 	"\x12ReportObservations\x12\x15.atc.ObservationBatch\x1a\n" +
 	".atc.EmptyB\x14Z\x12atc/internal/atcpbb\x06proto3"
 
@@ -848,7 +960,7 @@ func file_atc_proto_rawDescGZIP() []byte {
 	return file_atc_proto_rawDescData
 }
 
-var file_atc_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_atc_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_atc_proto_goTypes = []any{
 	(*Empty)(nil),            // 0: atc.Empty
 	(*Position)(nil),         // 1: atc.Position
@@ -861,34 +973,37 @@ var file_atc_proto_goTypes = []any{
 	(*JSONBlob)(nil),         // 8: atc.JSONBlob
 	(*Observation)(nil),      // 9: atc.Observation
 	(*ObservationBatch)(nil), // 10: atc.ObservationBatch
-	nil,                      // 11: atc.OwnerTable.OwnersEntry
+	(*Instruction)(nil),      // 11: atc.Instruction
+	(*Instructions)(nil),     // 12: atc.Instructions
+	nil,                      // 13: atc.OwnerTable.OwnersEntry
 }
 var file_atc_proto_depIdxs = []int32{
 	1,  // 0: atc.PositionBatch.positions:type_name -> atc.Position
-	11, // 1: atc.OwnerTable.owners:type_name -> atc.OwnerTable.OwnersEntry
+	13, // 1: atc.OwnerTable.owners:type_name -> atc.OwnerTable.OwnersEntry
 	9,  // 2: atc.ObservationBatch.observations:type_name -> atc.Observation
-	6,  // 3: atc.OwnerTable.OwnersEntry.value:type_name -> atc.Owner
-	0,  // 4: atc.Node.Status:input_type -> atc.Empty
-	4,  // 5: atc.Node.Apply:input_type -> atc.Command
-	2,  // 6: atc.Node.Track:input_type -> atc.PositionBatch
-	0,  // 7: atc.Node.Owners:input_type -> atc.Empty
-	0,  // 8: atc.Node.Sectors:input_type -> atc.Empty
-	0,  // 9: atc.Node.State:input_type -> atc.Empty
-	2,  // 10: atc.Gateway.ReportPositions:input_type -> atc.PositionBatch
-	10, // 11: atc.Gateway.ReportObservations:input_type -> atc.ObservationBatch
-	3,  // 12: atc.Node.Status:output_type -> atc.NodeStatus
-	5,  // 13: atc.Node.Apply:output_type -> atc.ApplyReply
-	0,  // 14: atc.Node.Track:output_type -> atc.Empty
-	7,  // 15: atc.Node.Owners:output_type -> atc.OwnerTable
-	8,  // 16: atc.Node.Sectors:output_type -> atc.JSONBlob
-	8,  // 17: atc.Node.State:output_type -> atc.JSONBlob
-	0,  // 18: atc.Gateway.ReportPositions:output_type -> atc.Empty
-	0,  // 19: atc.Gateway.ReportObservations:output_type -> atc.Empty
-	12, // [12:20] is the sub-list for method output_type
-	4,  // [4:12] is the sub-list for method input_type
-	4,  // [4:4] is the sub-list for extension type_name
-	4,  // [4:4] is the sub-list for extension extendee
-	0,  // [0:4] is the sub-list for field type_name
+	11, // 3: atc.Instructions.instructions:type_name -> atc.Instruction
+	6,  // 4: atc.OwnerTable.OwnersEntry.value:type_name -> atc.Owner
+	0,  // 5: atc.Node.Status:input_type -> atc.Empty
+	4,  // 6: atc.Node.Apply:input_type -> atc.Command
+	2,  // 7: atc.Node.Track:input_type -> atc.PositionBatch
+	0,  // 8: atc.Node.Owners:input_type -> atc.Empty
+	0,  // 9: atc.Node.Sectors:input_type -> atc.Empty
+	0,  // 10: atc.Node.State:input_type -> atc.Empty
+	2,  // 11: atc.Gateway.ReportPositions:input_type -> atc.PositionBatch
+	10, // 12: atc.Gateway.ReportObservations:input_type -> atc.ObservationBatch
+	3,  // 13: atc.Node.Status:output_type -> atc.NodeStatus
+	5,  // 14: atc.Node.Apply:output_type -> atc.ApplyReply
+	0,  // 15: atc.Node.Track:output_type -> atc.Empty
+	7,  // 16: atc.Node.Owners:output_type -> atc.OwnerTable
+	8,  // 17: atc.Node.Sectors:output_type -> atc.JSONBlob
+	8,  // 18: atc.Node.State:output_type -> atc.JSONBlob
+	12, // 19: atc.Gateway.ReportPositions:output_type -> atc.Instructions
+	0,  // 20: atc.Gateway.ReportObservations:output_type -> atc.Empty
+	13, // [13:21] is the sub-list for method output_type
+	5,  // [5:13] is the sub-list for method input_type
+	5,  // [5:5] is the sub-list for extension type_name
+	5,  // [5:5] is the sub-list for extension extendee
+	0,  // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_atc_proto_init() }
@@ -902,7 +1017,7 @@ func file_atc_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_atc_proto_rawDesc), len(file_atc_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   12,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

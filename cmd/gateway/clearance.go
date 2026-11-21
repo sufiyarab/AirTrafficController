@@ -230,6 +230,9 @@ func (g *gateway) tryClearance(c *clearance) outcome {
 		return outcome{kind: outNotReady, cluster: o.Sector, reason: o.Sector + ": " + err.Error(), sector: sector}
 	}
 	g.safetyCommitted(c, sector, o, start) // still holding the aircraft's lock
+	g.mu.Lock()
+	g.recordFlyableLocked(c) // the simulated aircraft will now fly it (conflict_follow.go)
+	g.mu.Unlock()
 	return outcome{kind: outCommitted, sector: sector, index: idx}
 }
 

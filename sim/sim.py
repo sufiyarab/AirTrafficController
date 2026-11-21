@@ -39,6 +39,18 @@ SPOOF_Y = float(os.environ.get("SPOOF_Y", "20"))
 
 AIRCRAFT_FIELDS = ("callsign", "x", "y", "alt", "heading", "speed")
 
+# Following clearances (live and record modes). The gateway's reply to every
+# position report carries each aircraft's latest committed clearance; the
+# aircraft then flies towards it at these rates.
+FOLLOW = os.environ.get("FOLLOW_CLEARANCES", "on").strip().lower() not in ("off", "0", "false", "no")
+CLIMB_FPS = 2000 / 60   # 2,000 ft/min climb or descent
+TURN_DPS = 3.0          # standard-rate turn, degrees per second
+ACCEL_KTPS = 2.0        # speed change, knots per second
+
+# callsign -> {"applied": set of clearance ids, "alt"/"heading"/"speed": target}.
+# Kept apart from the aircraft dicts so recordings and reports stay unchanged.
+CONTROL = {}
+
 
 def resolve_path(filename):
     """Resolve relative files inside the simulator's /app directory."""
@@ -135,8 +147,63 @@ def load_scenario(filename):
     return fleet
 
 
+def parse_instruction(text):
+    """Turn a clearance into targets: {"alt": ft} / {"heading": deg} / {"speed": kt}.
+
+    Understands CLIMB/DESCEND [AND MAINTAIN] FLnnn, MAINTAIN FLnnn,
+    [TURN LEFT|RIGHT] HEADING ddd, and [REDUCE|INCREASE] SPEED nnn.
+    Anything else returns {} and the aircraft carries on.
+    """
+    words = text.upper().split()
+    for i, w in enumerate(words):
+        if w.startswith("FL") and w[2:].isdigit():
+            return {"alt": int(w[2:]) * 100}
+        if w == "HEADING" and i + 1 < len(words) and words[i + 1].isdigit():
+            return {"heading": int(words[i + 1]) % 360}
+        if w == "SPEED" and i + 1 < len(words) and words[i + 1].isdigit():
+            return {"speed": int(words[i + 1])}
+    return {}
+
+
+def apply_instructions(fleet, instructions):
+    """Take each committed clearance once (by clearance id), oldest first."""
+    if not FOLLOW:
+        return
+    by_cs = {ac["callsign"]: ac for ac in fleet}
+    for ins in instructions or []:
+        cs = ins.get("callsign")
+        if cs not in by_cs:
+            continue
+        ctl = CONTROL.setdefault(cs, {"applied": set()})
+        if ins.get("clearance_id") in ctl["applied"]:
+            continue
+        ctl["applied"].add(ins.get("clearance_id"))
+        targets = parse_instruction(ins.get("instruction", ""))
+        ctl.update(targets)
+        print(f"{cs}: flying clearance {ins.get('instruction')!r}" + ("" if targets else " (not understood, ignored)"), flush=True)
+
+
+def _toward(value, target, rate):
+    return target if abs(target - value) <= rate else value + math.copysign(rate, target - value)
+
+
+def fly_targets(ac, dt):
+    """Move altitude, heading and speed towards the cleared targets."""
+    ctl = CONTROL.get(ac["callsign"])
+    if not ctl:
+        return
+    if "alt" in ctl:
+        ac["alt"] = _toward(ac["alt"], ctl["alt"], CLIMB_FPS * dt)
+    if "speed" in ctl:
+        ac["speed"] = _toward(ac["speed"], ctl["speed"], ACCEL_KTPS * dt)
+    if "heading" in ctl:
+        diff = (ctl["heading"] - ac["heading"] + 540) % 360 - 180  # shortest way round, -180..180
+        ac["heading"] = (ac["heading"] + _toward(0, diff, TURN_DPS * dt)) % 360
+
+
 def step(ac, dt):
     """Advance aircraft and increase its FIFO sequence number."""
+    fly_targets(ac, dt)
     ac["seq"] = ac.get("seq", 0) + 1
     nm = ac["speed"] * dt / 3600.0
     rad = math.radians(ac["heading"])
@@ -150,7 +217,7 @@ gateway = GatewayClient("simulator")
 def send(fleet):
     # The gateway only gets what the aircraft claims, not where it transmits from.
     claims = [{k: v for k, v in ac.items() if k != "emitter"} for ac in fleet]
-    gateway.positions(claims)
+    return gateway.positions(claims)
 
 
 _pool = ThreadPoolExecutor(max_workers=max(1, 2 * len(RECEIVERS)))
@@ -188,9 +255,11 @@ def broadcast(fleet):
         _pool.submit(_broadcast_to, url, body)
 
 
-def send_safely(fleet):
+def send_safely(fleet, follow=False):
     try:
-        send(fleet)
+        instructions = send(fleet)
+        if follow:
+            apply_instructions(fleet, instructions)
     except (urllib.error.URLError, OSError) as error:
         print("gateway unreachable:", error, flush=True)
     broadcast(fleet)
@@ -235,7 +304,7 @@ def run_live():
             if recorder is not None:
                 record_frame(recorder, tick_number, fleet)
 
-            send_safely(fleet)
+            send_safely(fleet, follow=True)
 
             time.sleep(max(0.0, TICK - (time.monotonic() - start)))
 
