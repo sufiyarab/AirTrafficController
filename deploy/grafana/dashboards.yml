@@ -1,0 +1,13 @@
+# Tells Grafana to load every JSON file in /var/lib/grafana/dashboards
+# (mounted from deploy/grafana/dashboards/ by docker-compose.yml) into an "ATC" folder.
+apiVersion: 1
+providers:
+  - name: ATC
+    orgId: 1
+    folder: ATC
+    type: file
+    disableDeletion: false
+    allowUiUpdates: true      # edits made in the UI are kept in Grafana's database
+    updateIntervalSeconds: 10 # picks up changed JSON files without a restart
+    options:
+      path: /var/lib/grafana/dashboards
