@@ -19,6 +19,7 @@ docker compose --profile maekawa up --build   # also start the Maekawa baseline
 - Gateway state (JSON): http://localhost:8080/api/state
 - With metrics: `docker compose --profile metrics up --build`, then
   Prometheus on http://localhost:9090 and Grafana on http://localhost:3001
+  (dashboards are loaded automatically, see "Metrics and Grafana")
 
 Stop with `docker compose down`. That also wipes the Raft logs, because they
 live in each container's filesystem; `docker kill` / `docker start` keep them.
@@ -146,6 +147,45 @@ before they meet. Log in as `supervisor` and press the suggestion button.
 
 Both can be set on the command line, e.g. `FOLLOW_CLEARANCES=0 docker compose up`.
 
+## Metrics and Grafana
+
+```bash
+docker compose --profile metrics up --build
+```
+
+Open http://localhost:3001 (no login in the demo). Three dashboards are loaded
+into the **ATC** folder, with the overview as the home page:
+
+| Dashboard | What it answers |
+|---|---|
+| ATC Overview | Is the system healthy and how fast is it? Aircraft, nodes down, clusters without exactly one leader, safety invariants, predicted conflicts, ghost aircraft; aircraft per sector; handoffs and clearances per second; handoff and clearance latency (p50 / p95 / p99); Raft throughput |
+| ATC Raft Clusters | Consensus health, with a cluster picker: the role of every node over time (follower / candidate / leader), leaders per cluster, elections, replication lag, log throughput, the gateway's Ready flag and the clearance buffer |
+| ATC Elastic Sectors and Safety | Splits and merges: sector status over time, sector load against the split and merge thresholds, handoffs (completed / aborted / deferred), conflicts (detected / resolved / lost), spoof detections, detector run time |
+
+Two sources feed Prometheus (`deploy/prometheus.yml`, scraped every 2 s):
+every Raft node's `/metrics` (role, term, log indexes, tracks delivered and
+dropped) and the gateway's `/metrics` (`cmd/gateway/metrics.go`), which
+exports what only the gateway sees: sector load, handoff and clearance
+counts and latency histograms, the sector map, conflicts, spoof detection and
+the safety invariants.
+
+Things worth watching during a demo:
+
+- `scripts/chaos.sh kill-leader sector-1`: on the Raft dashboard one node row
+  turns from leader to follower, a candidate appears, a new leader is
+  elected, and "Leaders per cluster" dips to 0 and recovers. A clearance issued
+  during the election waits in the gateway buffer and is counted under
+  `path=buffered` in the clearance latency graph on the overview.
+- `docker compose -f docker-compose.yml -f docker-compose.surge.yml --profile metrics up --build`:
+  a sector climbs past the split threshold, the standby cluster turns ACTIVE,
+  and later it is merged back (purple markers on the Overview and Elastic graphs mark each change).
+
+Notes: the gateway's counters live in memory and start from 0 when the
+gateway restarts (`rate()` and `increase()` handle that). Node metrics carry
+`node` and `cluster` labels; gateway metrics carry `sector` or `cluster`.
+The dashboards are plain JSON in `deploy/grafana/dashboards/`; edit them in
+the Grafana UI, export the JSON and overwrite the file to keep a change.
+
 ## Experiments and graphs
 
 ```bash
@@ -221,7 +261,7 @@ python -m grpc_tools.protoc -I proto --python_out=sim --grpc_python_out=sim prot
 ```
 cmd/node/          Raft replica (hashicorp/raft + raft-boltdb), HTTP: /status /state /apply /metrics, gRPC: service Node
 cmd/gateway/       gateway: leader tracking, position multicast, handoff coordinator, WebSocket feed,
-                   safety invariants, conflict detection
+                   safety invariants, conflict detection, Prometheus /metrics
 cmd/maekawa/       Maekawa baseline (grid voting sets, INQUIRE/FAILED/YIELD)
 cmd/intruder/      mTLS demo: a rogue container trying to write to the registry
 internal/fsm/      replicated state machine: ownership states + key/value
@@ -231,7 +271,7 @@ docs/              how-it-works.md: every file, the course mapping, the comparis
 proto/atc.proto    gRPC contract; generated Go code in internal/atcpb/
 sim/               sim.py (live / record / replay, spoof mode), receiver.py (ground station)
 dashboard/         React + Vite radar
-deploy/            go.Dockerfile, prometheus.yml, grafana datasource
+deploy/            go.Dockerfile, prometheus.yml, grafana/ (datasource, dashboard provider, dashboards)
 scripts/          chaos.sh (fault injection), compare.py (Maekawa vs registry), gen-certs.sh (mTLS)
 ```
 

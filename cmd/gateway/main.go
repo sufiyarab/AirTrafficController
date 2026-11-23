@@ -173,6 +173,7 @@ func main() {
 	mux.HandleFunc("POST /api/elastic/split", g.elasticSplit)
 	mux.HandleFunc("POST /api/elastic/merge", g.elasticMerge)
 	mux.HandleFunc("GET /api/safety", g.safetyHandler)
+	mux.HandleFunc("GET /metrics", g.metricsHandler) // Prometheus (metrics.go)
 	go g.serveGRPC(envOr("GRPC_ADDR", ":9090"), mtls.Enabled())
 	addr := envOr("HTTP_ADDR", ":8080")
 	log.Printf("gateway on %s, clusters=%v", addr, g.clusters)
@@ -368,6 +369,7 @@ func (g *gateway) worker() {
 				g.st.AvgMs = (g.st.AvgMs*float64(g.st.Handoffs) + ms) / float64(g.st.Handoffs+1)
 				g.st.Handoffs++
 				g.st.LastMs = ms
+				handoffLatency.observe(ms / 1000)
 			}
 		}
 		g.mu.Unlock()

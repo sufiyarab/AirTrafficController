@@ -26,3 +26,10 @@ scrape_configs:
           - standby-a:8080
           - standby-b:8080
           - standby-c:8080
+
+  # The gateway exports what the nodes cannot see: sector load, handoffs,
+  # clearance and handoff latency, conflicts, spoof detection, safety
+  # invariants (cmd/gateway/metrics.go).
+  - job_name: gateway
+    static_configs:
+      - targets: [gateway:8080]

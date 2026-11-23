@@ -319,6 +319,7 @@ func (g *gateway) clearanceHandler(w http.ResponseWriter, r *http.Request) {
 	case outCommitted:
 		c.Status, c.Index = ClrCommitted, out.index
 		g.clr.st.Committed++
+		clearanceLatencyDirect.observe(float64(c.UpdatedMs-c.CreatedMs) / 1000)
 	case outRejected:
 		c.Status, c.Reason, code = ClrRejected, out.reason, out.code
 		g.clr.st.Rejected++
@@ -439,6 +440,7 @@ func (g *gateway) flushQueue(cluster string) {
 		case outCommitted:
 			c.Status, c.Reason, c.WaitingOn, c.Index = ClrCommitted, "", "", out.index
 			g.clr.st.Committed++
+			clearanceLatencyBuffered.observe(float64(c.UpdatedMs-c.CreatedMs) / 1000)
 		case outRejected:
 			c.Status, c.Reason, c.WaitingOn = ClrRejected, out.reason, ""
 			g.clr.st.Rejected++
