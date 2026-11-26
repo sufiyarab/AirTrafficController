@@ -74,6 +74,10 @@ type Sector struct {
 	Status string `json:"status"` // SectorActive, SectorStandby or SectorDraining
 	Region Region `json:"region"` // zero value while STANDBY
 	Index  uint64 `json:"index"`  // log index of the last change
+	// Parent is the sector this one was split from, while it holds that
+	// airspace. A merge hands the airspace back to it, so a split followed by
+	// a merge restores the original map.
+	Parent string `json:"parent,omitempty"`
 }
 
 // SectorMap is a copy of the whole map, safe to hand to other goroutines.
@@ -212,6 +216,7 @@ func (f *FSM) applySector(l *raft.Log, c Command) interface{} {
 		}
 		parent.Region, parent.Index = lo, l.Index
 		child.Region, child.Status, child.Index = hi, SectorActive, l.Index
+		child.Parent = parent.Name
 		f.sectors[parent.Name], f.sectors[child.Name] = parent, child
 
 	case "drain":
@@ -257,6 +262,7 @@ func (f *FSM) applySector(l *raft.Log, c Command) interface{} {
 		}
 		into.Region, into.Index = union, l.Index
 		child.Status, child.Region, child.Index = SectorStandby, Region{}, l.Index
+		child.Parent = ""
 		f.sectors[into.Name], f.sectors[child.Name] = into, child
 
 	default:
@@ -278,7 +284,9 @@ func (m SectorMap) SectorNames() []string {
 }
 
 // MergeTarget returns the sector that absorbs the named sector when it is
-// merged away: the ACTIVE neighbour whose region shares a whole edge with it
+// merged away: the sector it was split from, if that is still ACTIVE and still
+// shares a whole edge with it (so split then merge restores the original map);
+// otherwise the ACTIVE neighbour whose region shares a whole edge with it
 // (the lowest name if several do). It is a pure function of the map, so the
 // registry (to validate "drain") and every gateway (to know where a DRAINING
 // sector's flights must go) always agree without storing the choice anywhere.
@@ -286,6 +294,11 @@ func (m SectorMap) MergeTarget(name string) (string, bool) {
 	s, ok := m.Sectors[name]
 	if !ok || s.Region.Empty() {
 		return "", false
+	}
+	if p, ok := m.Sectors[s.Parent]; ok && s.Parent != name && p.Status == SectorActive {
+		if _, ok := s.Region.Union(p.Region); ok {
+			return s.Parent, true
+		}
 	}
 	for _, n := range m.SectorNames() {
 		o := m.Sectors[n]

@@ -245,3 +245,39 @@ func TestMergeTarget(t *testing.T) {
 		t.Fatalf("a draining sector cannot absorb others, got %q", to)
 	}
 }
+
+// Split a sector, merge it back: the map must be exactly what it was, even
+// when the spare half also shares a full edge with another sector.
+// (Bug: splitting sector-3 top/bottom and merging gave its top half to sector-1.)
+func TestSplitThenMergeRestoresTheMap(t *testing.T) {
+	quads := []Sector{
+		{Name: "sector-1", Status: SectorActive, Region: Region{0, 100, 100, 200}},   // top-left
+		{Name: "sector-2", Status: SectorActive, Region: Region{100, 100, 200, 200}}, // top-right
+		{Name: "sector-3", Status: SectorActive, Region: Region{0, 0, 100, 100}},     // bottom-left
+		{Name: "sector-4", Status: SectorActive, Region: Region{100, 0, 200, 100}},   // bottom-right
+		{Name: "standby", Status: SectorStandby},
+	}
+	for _, tc := range []struct{ parent, axis string }{
+		{"sector-3", "y"}, {"sector-3", "x"}, {"sector-1", "y"}, {"sector-4", "x"}, {"sector-2", "y"},
+	} {
+		f := New()
+		before := mustMap(t, applyAny(f, 1, "sector_init", "", quads))
+		mustMap(t, applyAny(f, 2, "split", tc.parent, SplitReq{Child: "standby", Axis: tc.axis}))
+		m := f.Sectors()
+		if m.Sectors["standby"].Parent != tc.parent {
+			t.Fatalf("%s/%s: the split child should remember its parent, got %q", tc.parent, tc.axis, m.Sectors["standby"].Parent)
+		}
+		into, ok := m.MergeTarget("standby")
+		if !ok || into != tc.parent {
+			t.Fatalf("%s/%s: standby should merge back into %s, got %q", tc.parent, tc.axis, tc.parent, into)
+		}
+		mustMap(t, applyAny(f, 3, "drain", "standby", nil))
+		after := mustMap(t, applyAny(f, 4, "merge", "standby", MergeReq{Into: into}))
+		for _, s := range quads {
+			got := after.Sectors[s.Name]
+			if got.Region != s.Region || got.Status != s.Status || got.Parent != "" {
+				t.Fatalf("%s/%s: %s is %+v after split+merge, want %+v (before: %+v)", tc.parent, tc.axis, s.Name, got, s, before.Sectors[s.Name])
+			}
+		}
+	}
+}
