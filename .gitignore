@@ -5,3 +5,4 @@ sim/recordings/
 .DS_StoreS
 *.patch
 .DS_Store
+certs/
