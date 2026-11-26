@@ -1,5 +1,37 @@
 # Air Traffic Controller but Different
 
+SOFE4790U Distributed Systems Fall 2026 final project.
+Team: Sufiya Arab, Mashal Niazi, Issaq Momand, Collins Ehirim, Chimdike Nnadi.
+
+A simulated air traffic control system where the airspace is split into
+sectors, and every sector is run by its own 3-node Raft cluster
+(hashicorp/raft). A replicated airspace registry decides which sector owns
+each aircraft, and aircraft move between sectors through a 3-phase handoff
+(begin, accept, commit), so no aircraft is ever lost or owned twice, even
+while nodes crash or the network splits.
+
+On top of that base design, the system adds:
+
+- **Self-resizing sectors:** a busy sector splits into a standby cluster and merges back when traffic drops.
+- **Live safety panel:** six safety rules are checked every second and shown on the radar.
+- **Ghost aircraft detection:** three ground receivers cross-check every aircraft's claimed position, so a spoofed aircraft is flagged and refused clearances.
+- **Conflict detection:** predicted losses of separation up to two minutes ahead, with a suggested climb or descent.
+- **Security:** controller login with roles, and gRPC with mutual TLS between services.
+- **Monitoring:** Prometheus metrics and Grafana dashboards.
+
+Everything runs with one command in Docker: 21 Raft nodes (4 sectors, a
+tower, the registry and a standby cluster, 3 nodes each), a Go gateway, a
+Python aircraft simulator, 3 ground receivers and a React radar dashboard.
+
+## Quick start
+
+1. Install Docker Desktop and start it.
+2. From the repository folder, run `docker compose up --build` (the first build takes a few minutes).
+3. Open http://localhost:3000 to see the radar. Log in as `supervisor` / `supervisor-demo` to issue clearances.
+4. Stop with `docker compose down`.
+
+The sections below explain each feature and how to demo it.
+
 ## What you need
 
 - **Docker Desktop** (or Docker Engine + Compose v2). That is all you need to
@@ -7,6 +39,15 @@
   the build containers (`golang:1.26-alpine`, `node:22-alpine`, `python:3.12-slim`).
 - Optional, for editing with autocomplete and running `go test` / `go vet`
   outside Docker: Go 1.26+. Optional for dashboard hot reload: Node 22.
+- Optional, for the experiment and comparison scripts: Python 3.10+
+  (standard library only; `matplotlib` for the graphs).
+
+**On Windows:** the `docker compose` commands work in PowerShell. The shell
+scripts (`scripts/chaos.sh`, `scripts/gen-certs.sh`) and the commands that set
+variables inline (like `SCENARIO=... docker compose up`) need Git Bash or WSL.
+In PowerShell, set the variable first instead:
+`$env:SCENARIO="scenarios/spoof_traffic.json"; docker compose up --build`.
+Use `python` instead of `python3` if that is how Python is installed.
 
 ## Run it
 
@@ -85,6 +126,35 @@ Tick the "coverage" box on the dashboard to draw each receiver's 200 NM
 range. Tunables: `VERIFY_THRESHOLD_NM` (gateway, default 3),
 `RECEIVER_NOISE_NM` (receivers, default 0.5).
 
+## Self-resizing sectors (elastic airspace)
+
+The gateway counts the aircraft in every sector once a second
+(`cmd/gateway/elastic.go`). When a sector holds 40 or more aircraft for 3
+checks in a row, it is split along its longer side: the new sector map is
+committed to the registry, the idle standby cluster takes the new half, and
+the aircraft in it move over through the normal 3-phase handoff. When the
+standby sector and its neighbour together drop to 20 or fewer, the standby
+sector is drained back and the cluster returns to STANDBY.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.surge.yml up --build
+```
+
+60 aircraft appear together in sector-1: within a few seconds the
+"elastic sectors" panel shows the split and the radar redraws the boundary,
+and once the aircraft spread out the sectors merge back. A supervisor can
+also split or merge by hand with the buttons in that panel.
+
+| Setting (gateway) | Default | What it does |
+|---|---|---|
+| `ELASTIC_SPLIT_AT` | 40 | aircraft at or above which a sector splits |
+| `ELASTIC_MERGE_AT` | 20 | combined aircraft at or below which a split sector merges back |
+| `ELASTIC_SUSTAIN` | 3 | one-second checks the condition must hold |
+| `ELASTIC_COOLDOWN_S` | 15 | pause after every split or merge |
+
+Known limitation: after a split, only the supervisor can issue clearances in
+the half on the standby cluster (see docs/collins_design.md, section 5).
+
 ## Safety-invariant panel
 
 The "safety invariants" panel on the dashboard checks six rules every second
@@ -127,8 +197,8 @@ to the loss) and a solid red line once separation is lost. The "conflicts" panel
 lists each one with a button that issues the suggested clearance through the
 normal clearance path (login and sector rules apply).
 
-The simulator now flies committed clearances: the reply to each position report
-(`ReportPositions` in `proto/atc.proto` now returns `Instructions`) carries the
+The simulator flies committed clearances: the reply to each position report
+(`ReportPositions` in `proto/atc.proto` returns `Instructions`) carries the
 latest committed clearances for those aircraft, and the simulator climbs at
 2,000 ft/min, turns at 3 degrees/s and changes speed at 2 kt/s to meet them.
 To try it:
@@ -143,9 +213,24 @@ before they meet. Log in as `supervisor` and press the suggestion button.
 | Setting | Default | What it does |
 |---|---|---|
 | `CONFLICT_LOOKAHEAD_S` (gateway) | 120 | look-ahead in seconds |
-| `FOLLOW_CLEARANCES` (simulator) | 1 | 0 = aircraft ignore clearances, as before |
+| `FOLLOW_CLEARANCES` (simulator) | 1 | 0 = aircraft ignore clearances |
 
 Both can be set on the command line, e.g. `FOLLOW_CLEARANCES=0 docker compose up`.
+
+## Record and replay traffic
+
+The simulator can record every tick to a JSON Lines file and replay it later,
+so the same traffic can be used for every run (`sim/recording.py`).
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.record.yml up --build   # records basic_traffic.json to sim/recordings/traffic.jsonl
+docker compose down
+docker compose -f docker-compose.yml -f docker-compose.replay.yml up --build   # replays it
+docker compose logs simulator | tail                                           # "replay complete: N attempted, N acknowledged, 0 failed"
+```
+
+Run `docker compose down` between recording and replaying so the Raft nodes
+start fresh and old sequence numbers do not reject the replayed reports.
 
 ## Metrics and Grafana
 
@@ -264,36 +349,53 @@ cmd/gateway/       gateway: leader tracking, position multicast, handoff coordin
                    safety invariants, conflict detection, Prometheus /metrics
 cmd/maekawa/       Maekawa baseline (grid voting sets, INQUIRE/FAILED/YIELD)
 cmd/intruder/      mTLS demo: a rogue container trying to write to the registry
+cmd/hashpw/        makes a bcrypt hash for deploy/users.json
 internal/fsm/      replicated state machine: ownership states + key/value
 internal/mtls/     mutual TLS setup and per-RPC authorization by certificate name
 internal/atcpb/    generated gRPC code (from proto/atc.proto)
-docs/              how-it-works.md: every file, the course mapping, the comparison
+docs/              how-it-works.md (every file, the course mapping, the Maekawa comparison), collins_design.md (security and interface design)
 proto/atc.proto    gRPC contract; generated Go code in internal/atcpb/
 sim/               sim.py (live / record / replay, spoof mode), receiver.py (ground station)
 dashboard/         React + Vite radar
 deploy/            go.Dockerfile, prometheus.yml, grafana/ (datasource, dashboard provider, dashboards)
-scripts/          chaos.sh (fault injection), compare.py (Maekawa vs registry), gen-certs.sh (mTLS)
+scripts/           chaos.sh (fault injection), compare.py (Maekawa vs registry), gen-certs.sh (mTLS),
+                   experiments/ (run.py and plot.py for the report's experiments)
+results/           experiment output (created by the scripts, git-ignored)
 ```
 
-## Current state and next steps
+## Tests
 
-Working now: all clusters elect leaders and replicate;
-clearances need a controller login and are limited to the controller's sectors;
-ground receivers cross-check every aircraft's claimed position and the radar
-flags spoofed aircraft, which cannot receive clearances; positions reach the
-controlling sector's replicas by B-multicast with FIFO sequence numbers;
-handoffs run in 3 phases through the registry (begin, target accepts, commit),
-abort when the target has no majority, and resume after a crash; the Maekawa
-baseline and comparison script run; the radar shows aircraft (amber while
-transferring), sectors, every node's role/term, and handoff counters; every
-internal link is gRPC with mutual TLS, and only the gateway can write to a
-Raft log.
+```bash
+go vet ./...
+go test ./...                       # FSM, handoff, elastic planner, auth, clearances, safety rules, conflicts, gRPC, mTLS
+```
 
-Known limitation: after an elastic split, only the supervisor can issue
-clearances in the half on the standby cluster (see docs/collins_design.md,
-section 5).
+GitHub Actions (`.github/workflows/ci.yml`) runs the Go tests and a Docker
+Compose smoke test on every pull request.
 
-- Elastic split/merge using the standby cluster, sector map in the registry (Issaq)
-- Scenario files, conflict/stress modes, replay (Mashal)
-- Conflict detection with suggested resolutions; the simulator follows clearances
-- Grafana dashboards (Chimidike)
+## Results
+
+The experiment results used in the final report (run on November 21, 2026)
+are summarized below. `scripts/experiments/run.py` writes the raw JSON to
+`results/`, which is git-ignored, so rerun the experiments to reproduce them.
+
+| Experiment | Result |
+|---|---|
+| Leader failover | 18 of 18 crashes recovered, new leader in 2.65 s on average; every clearance sent during an election committed |
+| Scaling (50 to 400 aircraft) | 39 to 95 ms per handoff, none aborted, gateway CPU under 5% |
+| Surge | sector split 2.9 s after the overload, merged back at 86.9 s, 134 handoffs, none aborted |
+| Ghost aircraft | 5 of 5 detected within 2.1 s, 0 of 100 real aircraft flagged |
+| Chaos (10 faults) | all 6 safety rules held; 216 clearances committed, none lost |
+| Transport | gRPC + mTLS about the same latency as HTTP/JSON (p50 about 29 ms) |
+| Conflict detection | alerts about 119 s ahead; no loss of separation when the suggestion is issued |
+
+## Known limitations
+
+- The gateway is a single container, so it is a single point of failure.
+  Handoffs in progress are stored in the registry and resume when it restarts.
+- Leader election takes about 2.5 s with hashicorp/raft's default timeouts.
+- After an elastic split, only the supervisor can clear aircraft in the standby half.
+- The radar and login use plain HTTP; Raft traffic between replicas is outside mutual TLS.
+- Ghost detection compares ranges from simulated receivers; it is a simplified
+  form of multilateration, not real radio timing.
+- There is one standby cluster, so the airspace grows to at most five sectors.
